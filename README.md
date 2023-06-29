@@ -64,5 +64,3 @@ https://api.docs.cpanel.net/openapi/whm/tag/Account-Management/
 ##### Verificador de Licença Cpanel
 https://verify.cpanel.net/app/verify
 
-Token
-7F18ZM3344K4XLXE1T91J9DH8M0YD02D
