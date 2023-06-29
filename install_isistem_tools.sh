@@ -9,9 +9,10 @@ D='\033[01;32m'
 R='\033[0m'
 
 cd /root
+yum -y install git
 git clone https://github.com/isistem/isistem-tools-online/
 
-cd isistem-tools/isistem_tools81
+cd isistem-tools-online/isistem_tools81
 cp -R isistem-tools /usr/local/cpanel/whostmgr/docroot/cgi
 
 #Movendo o icone para seu local de armazenamento
