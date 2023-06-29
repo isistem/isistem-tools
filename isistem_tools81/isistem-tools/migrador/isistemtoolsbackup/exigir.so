@@ -1,0 +1,572 @@
+#!/usr/local/cpanel/3rdparty/bin/perl
+
+BEGIN {
+    unshift @INC, '/usr/local/cpanel';
+
+    $SIG{__WARN__} = sub {
+
+        # print "ERRO INTERNO DO MODULO PERL! [...]<br>";
+    };
+    $SIG{__DIE__} = sub {
+
+        # print "ERRO INTERNO DO MODULO PERL! [...]<br>";
+    };
+}
+
+#use strict;
+use Socket                ();
+use Cpanel::HttpRequest   ();
+use Cpanel::Encoder::URI  ();
+use Cpanel::Encoder::Tiny ();
+use Cpanel::MD5           ();
+use Cpanel::Filesys       ();
+use MIME::Base64;
+use URI::Escape;
+
+$| = 1;
+
+my $httpClient = Cpanel::HttpRequest->new( 'hideOutput' => 1, 'timeout' => 10 );
+
+my $host        = $ARGV[0];
+my $user        = $ARGV[1];
+my $domain      = $ARGV[2];
+my $pass        = $ARGV[3];
+my $usrowner    = $ARGV[4];
+my $usrwhm      = $ARGV[5];
+my $skiprestore = $ARGV[6];
+
+$host   =~ s/\///g;
+$user   =~ s/\///g;
+$domain =~ s/\///g;
+$host   =~ s/\.\.//g;
+$user   =~ s/\.\.//g;
+$domain =~ s/\.\.//g;
+$domain =~ s/[\s\n\t\r]*//g;
+$pass = decode_base64($pass);
+
+my $forcerestore  = <STDIN>;
+$forcerestore =~ s/\n//g;
+my $params = $forcerestore ? '--force' : '';
+
+my $extractdir;
+my $md5sum;
+my $part;
+
+if ($usrwhm ne 'root'){
+my $diretoriohome = ( getpwnam($usrwhm) )[7];
+$part = $diretoriohome;
+}
+else{
+$part = '/home';
+}
+
+my $usebestdisk = $ARGV[5];
+if ($usebestdisk) {
+my $part = Cpanel::Filesys::getmntpoint();
+}
+
+my @PKGDEBUG;
+my ( $fetch_ok, $archive_file, $extractdir, $md5sum, $pkgdebug ) = fetch_acct_by_ftp_and_http( 'user' => $user, 'host' => $host, 'domain' => $domain, 'pass' => $pass, 'part' => $part );
+        push @PKGDEBUG, $pkgdebug;
+    
+if ($fetch_ok) {
+    if ($md5sum) {
+            print "<br>Verificando a integridade do arquivo de backup... ";
+        my $newmd5 = Cpanel::MD5::getmd5sum($archive_file);
+        if ( $newmd5 eq $md5sum ) {
+            print "OK.<br>";
+        }
+        else {
+            print "<h5 class='ui red header'>O arquivo de backup é inválido ou foi corrompido!<br>";
+    print "NÃO FOI POSSÍVEL MIGRAR A CONTA $user @ $domain!</div>";
+	
+            exit;
+        }
+    }
+    elsif ( -z $archive_file ) {
+            print "<h5 class='ui red header'>O arquivo de backup não existe ou foi corrompido!<br>";
+    print "NÃO FOI POSSÍVEL MIGRAR A CONTA $user @ $domain!</div>";
+
+        exit;
+    }
+
+    print "O arquivo de backup foi salvo em: $archive_file<br>";
+
+if($usrwhm eq 'root'){
+if (!$skiprestore) { system ("/usr/local/cpanel/whostmgr/docroot/cgi/isistem-tools/migrador/isistemtoolsbackup/incluir.so $params $usrwhm $usrowner $archive_file | tee /var/log/isistemtoolsbackup/restauracao/${user}.txt"); }
+}
+else{
+if (!$skiprestore) { system ("/usr/local/cpanel/whostmgr/docroot/cgi/isistem-tools/migrador/isistemtoolsbackup/incluir.so --skipres $usrwhm $usrowner $archive_file | tee /var/log/isistemtoolsbackup/restauracao/${user}.txt"); }
+}
+    print "MIGRAÇÃO DA CONTA $user @ $domain CONCLUÍDA!";
+
+}
+else {
+
+    print "<h5 class='ui red header'>NÃO FOI POSSÍVEL MIGRAR A CONTA $user @ $domain!</div>";
+}
+
+
+sub fetch_acct_by_ftp_and_http {
+    my %OPTS   = @_;
+    my $host   = $OPTS{'host'};
+    my $domain = $OPTS{'domain'};
+    my $user   = $OPTS{'user'};
+    my $pass   = $OPTS{'pass'};
+    my $part   = $OPTS{'part'};
+
+    print "<br>Iniciando migração forçada da conta $user @ $domain...<br>";
+
+    my $md5sum;
+    my $archive_name;
+    my $uid;
+
+my $ipdominio = gethostbyname($domain);
+
+if($ipdominio eq "")
+{
+$domain = $host;
+}
+
+
+    $SIG{'ALRM'} = sub {
+
+    print "<h5 class='ui red header'><br>Parece estar havendo um erro na migração!<br></div>";
+    my $ftp = Net::FTP->new( "$host", Debug => 0 );
+    if ( $ftp->login( $user, $pass ) ) {
+
+    }
+    else {
+
+    }
+
+    print "Removendo scripts de backup do servidor remoto... ";
+    $ftp->rmdir("public_html/forcedbackup", 1);
+    $ftp->rmdir("public_html/cgi-bin/forcedbackup", 1);
+    print "OK.<br>";
+    $ftp->quit;
+    print "<h5 class='ui red header'>NÃO FOI POSSÍVEL MIGRAR A CONTA $user @ $domain!<br></div>";
+        exit;
+    };
+
+    alarm(7200);
+    require Net::FTP;
+    print "Conectando-se ao servidor remoto via FTP... ";
+    my $ftp = Net::FTP->new( "$host", Debug => 0 ) || do {
+print "<br>Não foi possível se conectar ao servidor!<br>";
+        exit;
+    };
+    if ( $ftp->login( $user, $pass ) ) {
+        print "OK.<br>";
+    }
+    else {
+        print "<br>Não foi possível fazer login!<br>";
+        exit;
+    }
+    
+    $ftp->mkdir( "public_html/cgi-bin/forcedbackup", 1 );
+    $ftp->site("chmod 755 public_html/cgi-bin/forcedbackup");
+    $ftp->mkdir( "public_html/forcedbackup", 1 );
+    $ftp->site("chmod 755 public_html/forcedbackup");
+    $ftp->cwd("public_html/cgi-bin/forcedbackup");
+    print "Uploadando arquivos do FORCED BACKUP®... ";
+    chdir("/usr/local/cpanel/whostmgr/docroot/cgi/isistem-tools/migrador/isistemtoolsbackup/modulos");
+    $ftp->put("backup.cgi");
+    $ftp->put("remocao.cgi");
+    $ftp->put("baixar.cgi");
+    $ftp->put("checar.cgi");
+    $ftp->site("chmod 755 backup.cgi");
+    $ftp->site("chmod 755 remocao.cgi");
+    $ftp->site("chmod 755 baixar.cgi");
+    $ftp->site("chmod 755 checar.cgi");
+    $ftp->cwd("/public_html/forcedbackup");
+    $ftp->put("config.pm");
+    $ftp->put("requerer.so");
+    $ftp->put("backup.php");
+    $ftp->put("remocao.php");
+    $ftp->put("php.ini");
+    $ftp->put("excluir.conf");
+    $ftp->site("chmod 755 config.pm");
+    $ftp->site("chmod 755 requerer.so");
+    $ftp->site("chmod 644 backup.php");
+    $ftp->site("chmod 644 remocao.php");
+    $ftp->site("chmod 644 php.ini");
+    $ftp->site("chmod 644 excluir.conf");
+    print "OK.<br>";
+    print "Encerrando conexão com o servidor FTP... ";
+    $ftp->quit;
+    print "OK.<br>";
+    print "Checando variáveis do servidor remoto... ";
+    my $odebug    = '';
+    my $hassuexec = 0;
+    my $script    = 'checar.cgi';
+    print "<br>Tentando acessar o servidor pelo domínio... ";
+    my @FOPTS     = ( [ $domain, "/cgi-bin/forcedbackup/${script}?${user}" ], [ $domain, "/cgi-bin/forcedbackup/${script}?${user}" ] );
+    my $req;
+    foreach my $hoste (@FOPTS) {
+        my ( $domain, $url ) = @{$hoste};
+        $req = $httpClient->request(
+            'host'     => $domain,
+            'url'      => $url,
+            'protocol' => 0,
+            'timeout' => 10,
+        );
+        next if ( $req !~ /UID/ );
+        foreach ( split( /\n/, $req ) ) {
+            $odebug .= $_;
+            if (/MYUID: (\d+)/) {
+                $uid = $1;
+            }
+            if (/REALUID: (\d+)/) {
+                if ( $1 == $uid ) {
+                    $hassuexec = 1;
+                }
+            }
+        }
+        last;
+    }
+
+    if ($uid) {
+        print "OK.<br>";
+    }
+    else {
+    print "<br>Não foi possível acessar o servidor pelo domínio!<br>";
+    $falhadominio = 1;
+    print "Tentando acessar o servidor pelo IP... ";
+    my @FOPTS     = ( [ $host, "/~${user}/cgi-bin/forcedbackup/${script}?${user}" ], [ $host, "/~${user}/cgi-bin/forcedbackup/${script}?${user}" ] );
+    my $req;
+    foreach my $hoste (@FOPTS) {
+        my ( $host, $url ) = @{$hoste};
+        $req = $httpClient->request(
+            'host'     => $host,
+            'url'      => $url,
+            'protocol' => 0,
+            'timeout' => 10,
+        );
+        next if ( $req !~ /UID/ );
+        foreach ( split( /\n/, $req ) ) {
+            $odebug .= $_;
+            if (/MYUID: (\d+)/) {
+                $uid = $1;
+            }
+            if (/REALUID: (\d+)/) {
+                if ( $1 == $uid ) {
+                    $hassuexec = 1;
+                }
+            }
+        }
+        last;
+    }
+    if ($uid) {
+        print "OK.<br>";
+    }
+    else {
+        print "<br>Não foi possível acessar o servidor pelo IP!<br>";
+		    my $ftp = Net::FTP->new( "$host", Debug => 0 );
+    if ( $ftp->login( $user, $pass ) ) {
+
+    }
+    else {
+return ( 0, '', '', $pkgdebug );
+    }
+
+    print "Finalizando conexão com o servidor remoto... ";
+    $ftp->rmdir("public_html/forcedbackup", 1);
+    $ftp->rmdir("public_html/cgi-bin/forcedbackup", 1);
+    print "OK.<br>";
+    $ftp->quit;
+
+return ( 0, '', '', $pkgdebug );
+
+}
+    }
+
+    my $proto = getprotobyname('tcp');
+    socket( Socket_Handle, &Socket::AF_INET, &Socket::SOCK_STREAM, $proto );
+    my $iaddr = gethostbyname($host);
+    my $port  = getservbyname( 'http', 'tcp' );
+    my $sin   = Socket::sockaddr_in( $port, $iaddr );
+    connect( Socket_Handle, $sin );
+
+    alarm(7200);
+    if ( !$hassuexec ) {
+        print "O SuExec não está ativado no servidor remoto.<br>Requisitaremos o backup remoto via script PHP.<br><br>";
+
+if ($falhadominio)
+{
+        send Socket_Handle, "POST /~${user}/forcedbackup/backup.php?user=${user}&pass=${pass} HTTP/1.0\n", 0;
+}
+else
+{
+        send Socket_Handle, "POST /forcedbackup/backup.php?user=${user}&pass=${pass} HTTP/1.0\n", 0;
+}
+    }
+    else {
+        print "O SuExec está ativado no servidor remoto.<br>Requisitaremos o backup remoto via script CGI.<br><br>";
+
+if ($falhadominio)
+{
+        send Socket_Handle, "POST /~${user}/cgi-bin/forcedbackup/backup.cgi?user=${user}&pass=${pass} HTTP/1.0\n", 0;
+}
+else
+{
+        send Socket_Handle, "POST /cgi-bin/forcedbackup/backup.cgi?user=${user}&pass=${pass} HTTP/1.0\n", 0;
+}
+    }
+    if ( $domain ne "" ) {
+        send Socket_Handle, "Host: ${domain}\n", 0;
+    }
+    my $ct = "user=${user}&pass=" . Cpanel::Encoder::URI::uri_encode_str($pass);
+    my $cl = length($ct);
+
+    send Socket_Handle, "Content-length: ${cl}\n", 0;
+    send Socket_Handle, "Content-Type: application/x-www-form-urlencoded\n", 0;
+    # send Socket_Handle, "Content: $ct\n", 0;
+    send Socket_Handle, "Connection: close\n\n",   0;
+    send Socket_Handle, $ct, 0;
+
+    my $pkgdebug  = '';
+    my $inheaders = 1;
+    my $archive_name;
+    my $md5sum;
+    while (<Socket_Handle>) {
+        $pkgdebug .= $_;
+        s/\n//g;
+        if ( !$inheaders ) {
+            if (/^MD5\s+do\s+arquivo:\s+(\S+)/) {
+                $md5sum = $1;
+                print "<br>";
+            }
+            if (/^\s*Arquivo\s+de\s+backup\s+compactado:\s+(\S+)/) {
+                ($archive_name) = $1 =~ m/([^\/]+)$/;
+                $archive_name =~ s/[.]tar[.]gz$//;
+            }
+            print;
+            print "\n";
+        }
+        if ( /^$/ || /Content-Type/ ) { $inheaders = 0; }
+    }
+    shutdown( Socket_Handle, 2 );
+    close(Socket_Handle);
+
+    print "<br><br>Baixando o arquivo de backup para o servidor local... ";
+    chdir $part || return (0);
+    mkdir( "cptmp", 0700 );
+    chdir("$part/cptmp") || return (0);
+    mkdir( $user, 0700 );
+    chdir $user || return (0);
+    alarm(7200);
+if ($falhadominio)
+{
+    $httpClient->download( "http://$host/~${user}/cgi-bin/forcedbackup/baixar.cgi?${user}", "cpmove-${user}.tmp" );
+}
+else
+{
+    $httpClient->download( "http://$domain/cgi-bin/forcedbackup/baixar.cgi?${user}", "cpmove-${user}.tmp" );
+}
+    if ( !-e "cpmove-${user}.tmp" || -z _ ) {
+        print "<br>Não foi possível fazer download do arquivo de backup!<br>";
+        unlink "cpmove-${user}.tmp";
+        
+my $script = '';
+    if ( !$hassuexec ) {
+        $script = "remocao.php";
+        print "Finalizando conexão com o servidor remoto... ";
+
+		if ($falhadominio)
+{		
+my @FOPTS = ( [ $host, "/~${user}/forcedbackup/${script}" ], [ $host, "/~${user}/forcedbackup/${script}" ] );
+    foreach my $hoste (@FOPTS) {
+        my ( $host, $url ) = @{$hoste};
+        my $req = $httpClient->request(
+            'host'     => $host,
+            'url'      => $url,
+            'protocol' => 0,
+        );
+        if ( $req =~ /FINALIZADO/i ) {
+            print "OK.<br>";
+            last;
+        }
+    }
+}		
+		
+		else{		
+my @FOPTS = ( [ $domain, "/forcedbackup/${script}" ], [ $domain, "/forcedbackup/${script}" ] );
+    foreach my $hoste (@FOPTS) {
+        my ( $domain, $url ) = @{$hoste};
+        my $req = $httpClient->request(
+            'host'     => $domain,
+            'url'      => $url,
+            'protocol' => 0,
+        );
+        if ( $req =~ /FINALIZADO/i ) {
+            print "OK.<br>";
+            last;
+        }
+    }
+}
+    my $ftp = Net::FTP->new( "$host", Debug => 0 );
+    if ( $ftp->login( $user, $pass ) ) {
+
+    }
+    else {
+return ( 0, '', '', $pkgdebug );
+    }
+
+    print "Removendo scripts de backup do servidor remoto... ";
+    $ftp->rmdir("public_html/forcedbackup", 1);
+    $ftp->rmdir("public_html/cgi-bin/forcedbackup", 1);
+    print "OK.<br>";
+    $ftp->quit;
+
+return ( 0, '', '', $pkgdebug );
+
+    }
+    else {
+        $script = "remocao.cgi";
+        print "Finalizando conexão com o servidor remoto... ";
+		
+				if ($falhadominio)
+		{
+my @FOPTS = ( [ $host, "/~${user}/cgi-bin/forcedbackup/${script}?${user}" ], [ $host, "/~${user}/cgi-bin/forcedbackup/${script}?${user}" ] );
+    foreach my $hoste (@FOPTS) {
+        my ( $host, $url ) = @{$hoste};
+        my $req = $httpClient->request(
+            'host'     => $host,
+            'url'      => $url,
+            'protocol' => 0,
+        );
+        if ( $req =~ /FINALIZADO/i ) {
+            print "OK.<br>";
+            last;
+        }
+		}
+		}
+
+		else{
+my @FOPTS = ( [ $domain, "/cgi-bin/forcedbackup/${script}?${user}" ], [ $domain, "/cgi-bin/forcedbackup/${script}?${user}" ] );
+    foreach my $hoste (@FOPTS) {
+        my ( $domain, $url ) = @{$hoste};
+        my $req = $httpClient->request(
+            'host'     => $domain,
+            'url'      => $url,
+            'protocol' => 0,
+        );
+        if ( $req =~ /FINALIZADO/i ) {
+            print "OK.<br>";
+            last;
+        }
+		}
+		}
+		}
+    my $ftp = Net::FTP->new( "$host", Debug => 0 );
+    if ( $ftp->login( $user, $pass ) ) {
+
+    }
+    else {
+return ( 0, '', '', $pkgdebug );
+    }
+
+    print "Removendo scripts de backup do servidor remoto... ";
+    $ftp->rmdir("public_html/forcedbackup", 1);
+    $ftp->rmdir("public_html/cgi-bin/forcedbackup", 1);
+    print "OK.<br>";
+    $ftp->quit;
+
+return ( 0, '', '', $pkgdebug );
+
+    }
+    else {
+    print "OK.<br>";
+    my $now = time();
+    system( '/bin/mv', '-f', '--', "cpmove-$user.tmp", "$part/cpmove-$user.tar.gz" );
+
+}
+    my $script = '';
+    if ( !$hassuexec ) {
+        $script = "remocao.php";
+        print "Finalizando conexão com o servidor remoto... ";
+		if ($falhadominio){
+my @FOPTS = ( [ $host, "/~${user}/forcedbackup/${script}" ], [ $host, "/~${user}/forcedbackup/${script}" ] );
+    foreach my $hoste (@FOPTS) {
+        my ( $host, $url ) = @{$hoste};
+        my $req = $httpClient->request(
+            'host'     => $host,
+            'url'      => $url,
+            'protocol' => 0,
+        );
+        if ( $req =~ /FINALIZADO/i ) {
+            print "OK.<br>";
+            last;
+        }
+    }
+	}
+	else{
+	my @FOPTS = ( [ $domain, "/forcedbackup/${script}" ], [ $domain, "/forcedbackup/${script}" ] );
+    foreach my $hoste (@FOPTS) {
+        my ( $domain, $url ) = @{$hoste};
+        my $req = $httpClient->request(
+            'host'     => $domain,
+            'url'      => $url,
+            'protocol' => 0,
+        );
+        if ( $req =~ /FINALIZADO/i ) {
+            print "OK.<br>";
+            last;
+        }
+    }
+	}
+    }
+    else {
+        $script = "remocao.cgi";
+        print "Finalizando conexão com o servidor remoto... ";
+				if ($falhadominio)
+				{
+my @FOPTS = ( [ $host, "/~${user}/cgi-bin/forcedbackup/${script}?${user}" ], [ $host, "/~${user}/cgi-bin/forcedbackup/${script}?${user}" ] );
+    foreach my $hoste (@FOPTS) {
+        my ( $host, $url ) = @{$hoste};
+        my $req = $httpClient->request(
+            'host'     => $host,
+            'url'      => $url,
+            'protocol' => 0,
+        );
+        if ( $req =~ /FINALIZADO/i ) {
+            print "OK.<br>";
+            last;
+        }
+    }
+	}
+					else{
+my @FOPTS = ( [ $domain, "/cgi-bin/forcedbackup/${script}?${user}" ], [ $domain, "/cgi-bin/forcedbackup/${script}?${user}" ] );
+    foreach my $hoste (@FOPTS) {
+        my ( $domain, $url ) = @{$hoste};
+        my $req = $httpClient->request(
+            'host'     => $domain,
+            'url'      => $url,
+            'protocol' => 0,
+        );
+        if ( $req =~ /FINALIZADO/i ) {
+            print "OK.<br>";
+            last;
+        }
+    }
+	}
+    }
+
+    my $ftp = Net::FTP->new( "$host", Debug => 0 );
+    if ( $ftp->login( $user, $pass ) ) {
+
+    }
+    else {
+return ( 0, '', '', $pkgdebug );
+    }
+
+    print "Removendo scripts de backup do servidor remoto... ";
+    $ftp->rmdir("public_html/forcedbackup", 1);
+    $ftp->rmdir("public_html/cgi-bin/forcedbackup", 1);
+    print "OK.<br>";
+    $ftp->quit;
+
+    alarm(0);
+    return ( 1, "$part/cpmove-$user.tar.gz", 'cpmove-' . $user, $md5sum, $pkgdebug );
+}

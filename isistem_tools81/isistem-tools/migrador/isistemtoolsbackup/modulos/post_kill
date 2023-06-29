@@ -1,0 +1,12 @@
+#!/usr/bin/perl
+
+# Easy Cp Backup
+# http://easycpanelbackup.com.br
+
+  my %OPTS = @ARGV;
+  my $user = $OPTS{'user'};
+  my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
+
+  open (MYFILE, '>/usr/easycpbackup/remocao/'.$user);
+  print MYFILE $mday;
+  close (MYFILE);

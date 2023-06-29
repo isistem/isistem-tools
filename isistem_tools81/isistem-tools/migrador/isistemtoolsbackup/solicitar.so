@@ -1,0 +1,312 @@
+#!/usr/local/cpanel/3rdparty/bin/perl
+
+BEGIN {
+    unshift @INC, '/usr/local/cpanel';
+
+    $SIG{__WARN__} = sub {
+
+        # my $errlt         = localtime( time() );
+        # my $safe_longmess = Carp::longmess(@_);
+        # $safe_longmess =~ s/('pass'\,?\s+\')[^\']+/$1__HIDDEN__/g;
+        # print "(internal error) $errlt [$$] error: " . $safe_longmess;
+
+        # print "ERRO INTERNO DO MODULO PERL! [...]<br>";
+    };
+    $SIG{__DIE__} = sub {
+
+        # my $errlt         = localtime( time() );
+        # my $safe_longmess = Carp::longmess(@_);
+        # $safe_longmess =~ s/('pass'\,?\s+\')[^\']+/$1__HIDDEN__/g;
+        # print "(internal error) $errlt [$$] error: " . $safe_longmess;
+
+        # print "ERRO INTERNO DO MODULO PERL! [...]<br>";
+    };
+}
+
+
+use strict;
+use Socket                ();
+use Cpanel::HttpRequest   ();
+use Cpanel::Encoder::URI  ();
+use Cpanel::Encoder::Tiny ();
+use Cpanel::MD5           ();
+use Cpanel::Filesys       ();
+use MIME::Base64;
+use URI::Escape;
+
+$| = 1;
+
+my $httpClient = Cpanel::HttpRequest->new( 'hideOutput' => 1 );
+# chdir("/usr/local/cpanel/whostmgr/docroot/easycpbackup");
+
+# system("echo '#!/usr/bin/perl\n\n# Easy Cp Backup v3\n# http://easycpbackup.com\n' > /usr/local/cpanel/whostmgr/docroot/cgi/isistem-tools/migrador/isistemtoolsbackup/solicitar.so");
+
+my $host        = $ARGV[0];
+my $user        = $ARGV[1];
+my $domain      = $ARGV[2];
+my $pass        = $ARGV[3];
+my $usrowner    = $ARGV[4];
+my $usrwhm      = $ARGV[5];
+my $skiprestore = $ARGV[6];
+
+$host   =~ s/\///g;
+$user   =~ s/\///g;
+$domain =~ s/\///g;
+$host   =~ s/\.\.//g;
+$user   =~ s/\.\.//g;
+$domain =~ s/\.\.//g;
+$domain =~ s/[\s\n\t\r]*//g;
+$pass = decode_base64($pass);
+
+my $forcerestore  = <STDIN>;
+$forcerestore =~ s/\n//g;
+my $params = $forcerestore ? '--force' : '';
+
+my $extractdir;
+my $md5sum;
+my $part;
+
+if ($usrwhm ne 'root'){
+my $diretoriohome = ( getpwnam($usrwhm) )[7];
+$part = $diretoriohome;
+}
+else{
+$part = '/home';
+}
+
+my $usebestdisk = $ARGV[5];
+if ($usebestdisk) {
+my $part = Cpanel::Filesys::getmntpoint();
+}
+
+my @PKGDEBUG;
+my ( $fetch_ok, $archive_file, $extractdir, $md5sum, $pkgdebug ) = fetch_acct_by_cpanel( 'user' => $user, 'host' => $host, 'domain' => $domain, 'pass' => $pass, 'part' => $part );
+push @PKGDEBUG, $pkgdebug;
+
+if ( !$fetch_ok ) {
+
+    print "<h5 class='ui red header'>MIGRAÇÃO DA CONTA $user @ $domain CONCLUÍDA!</div>";
+
+        exit;
+    }
+
+if ($fetch_ok) {
+
+    print "O arquivo de backup foi salvo em: $archive_file<br>";
+
+if($usrwhm eq 'root'){
+if (!$skiprestore) { system ("/usr/local/cpanel/whostmgr/docroot/cgi/isistem-tools/migrador/isistemtoolsbackup/incluir.so ${params} ${usrwhm} ${usrowner} ${archive_file} | tee /var/log/easycpbackup/restauracao/${user}.txt"); }
+
+}
+else{
+if (!$skiprestore) { system ("/usr/local/cpanel/whostmgr/docroot/cgi/isistem-tools/migrador/isistemtoolsbackup/incluir.so --skipres ${usrwhm} ${usrowner} ${archive_file} | tee /var/log/easycpbackup/restauracao/${user}.txt"); }
+}
+    print "MIGRAÇÃO DA CONTA $user @ $domain CONCLUÍDA!";
+
+}
+
+sub fetch_acct_by_cpanel {
+    my %OPTS = @_;
+    my $host = $OPTS{'host'};
+    my $user = $OPTS{'user'};
+    my $pass = $OPTS{'pass'};
+    my $part = $OPTS{'part'};
+
+    print "<br>Fazendo migração da conta $user @ $domain.<br>";
+
+    require Net::SSLeay;
+    {
+        local $SIG{'__DIE__'};
+        require IO::Socket::SSL;
+        IO::Socket::SSL->import('inet4');
+    }
+    # print "Verificando se já existem backups no servidor remoto... ";
+    my ( $current_bck_page, $current_bck_response, $current_bck_ref ) = get_current_backups( $host, $user, $pass );
+    # print "OK.<br>";
+    # print "Encontramos " . ( scalar keys %$current_bck_ref ) . " arquivo(s) de backup.<br>";
+
+
+    foreach my $bck ( keys %$current_bck_ref ) {
+        if ( $current_bck_ref->{$bck} ) {
+            print "Um backup já está em andamento no servidor remoto.<br>";
+            print "Backup em andamento: $bck.<br>";
+            print "Espere este backup terminar e tente novamente.<br>";
+            exit 1;
+        }
+    }
+
+    if ( $current_bck_response =~ /401/ ) {
+        return 0;
+    }
+
+    print "Requisitando um novo backup da conta... ";
+
+    my $encoded_request = '/xml-api/cpanel?xmlin=%3Ccpanelaction%3E%3Capiversion%3E1%3C/apiversion%3E%3Cmodule%3EFileman%3C/module%3E%3Cfunc%3Efullbackup%3C/func%3E%3C/cpanelaction%3E';
+    my $decoded_request = Cpanel::Encoder::URI::uri_decode_str($encoded_request);
+
+    #start the backup
+    my ( $page, $response, %reply_headers ) = Net::SSLeay::get_https(
+        $host, 2083,
+        $encoded_request,
+        Net::SSLeay::make_headers( Authorization => 'Basic ' . MIME::Base64::encode( "$user:$pass", '' ) )
+    );
+    print "OK.<br>";
+
+    print "Aguardando 10 segundos para o backup começar... ";
+    sleep(10);
+    print "OK.<br>";
+
+    print "Verificaremos agora se o backup já começou... ";
+    # print "Obtendo a lista atual de backups no servidor remoto... ";
+    my ( $new_bck_page, $new_bck_response, $new_bck_ref ) = get_current_backups( $host, $user, $pass );
+    print "OK.<br>";
+    # print "Encontramos " . ( scalar keys %$new_bck_ref ) . " arquivo(s) de backup.<br>";
+    my $backup_file;
+    foreach my $back ( keys %{$new_bck_ref} ) {
+        if ( !exists $current_bck_ref->{$back} ) {
+            $backup_file = $back;
+            last;
+        }
+    }
+
+if ( !$backup_file ) {
+        print "O backup requisitado por nós ainda não começou.<br>";
+        print "Esperando outros 10 segundos... ";
+sleep(10);
+print "OK.<br>";
+}
+
+if ( !$backup_file ) {
+print "O servidor está demorando a iniciar o backup.<br>";
+        print "Esperando agora 20 segundos... ";
+sleep(20);
+print "OK.<br>";
+    }
+
+if ( !$backup_file ) {
+print "Talvez o servidor remoto esteja sobrecarregado.<br>";
+        print "Esperando mais 30 segundos... ";
+sleep(30);
+print "OK.<br>";
+    }
+
+if ( !$backup_file ) {
+        print "Não foi possível iniciar o backup no servidor remoto!<br>";
+                return (0);
+    }
+
+    print "O servidor remoto está criando o arquivo de backup.<br>";
+    print "Temos que esperar até que ele seja feito.<br>";
+    my $bck_ref;
+    my $bck_page;
+    my $bck_response;
+    for ( 0 .. 1500 ) {
+        ( $bck_page, $bck_response, $bck_ref ) = get_current_backups( $host, $user, $pass );
+        if ( exists $bck_ref->{$backup_file} ) {
+            if ( !$bck_ref->{$backup_file} ) {
+                last;
+            }
+            else {
+                print "Backup ainda em andamento...<br>";
+                print "Checando novamente em 60 segundos...<br>";
+                sleep(15);
+                print "Checando novamente em 45 segundos...<br>";
+                sleep(15);
+            }
+        }
+        else {
+            print "O arquivo de backup sumiu! (...)<br>";
+            return (0);
+        }
+        print "Checando novamente em 30 segundos...<br>";
+        sleep(15);
+        print "Checando novamente em 15 segundos...<br>";
+        sleep(15);
+    }
+    print "Backup concluído: $backup_file.<br>";
+    print "Agora vamos baixar o arquivo de backup.<br>";
+    print "Baixando $backup_file... ";
+    chdir($part) || return (0);
+
+    my $client = IO::Socket::SSL->new( PeerHost => $host, PeerPort => 2083, SSL_verify_mode => 0 ) || do {
+        print "<br>Não foi possível conectar-se a servidor remoto ($host:2083)!<br>";
+        return (0);
+    };
+
+
+    my $now  = time();
+    my $dest = "cpmove-$user.tmp";
+
+    print {$client} "GET /download/$backup_file HTTP/1.0\r\n";
+    print {$client} "Connection: close\r\n";
+    print {$client} ( "Authorization: Basic " . MIME::Base64::encode_base64( $user . ':' . $pass ) . "\r\n\r\n" );
+    my $cl      = 1;
+    my $percent = 0;
+    open( my $out_fh, '>', $dest );
+    while ( readline($client) ) {
+        alarm(20);
+        if (/^content-length: (\d+)/i) {
+            #print;
+            $cl = $1;
+        }
+        last if (/^[\r\n]*$/);
+    }
+    alarm(0);
+    my $bytes;
+    my $new_percent;
+    my $cc = 0;
+    my $buffer;
+    my $bytesread = 0;
+    while ( $bytes = read( $client, $buffer, 65536 ) ) {
+        alarm(90);
+        $bytesread += $bytes;
+        $cc++;
+        if ( $cc == 170 ) {
+            $new_percent = int( ( $bytesread / $cl ) * ( $cl == 1 ? 1 : 100 ) );
+            if ( $new_percent != $percent ) {
+                $percent = $new_percent;
+                print "..${percent}" . ( $cl == 1 ? '' : '%' ) . "..\n";
+            }
+            $cc = 0;
+        }
+        print {$out_fh} $buffer;
+    }
+    alarm(0);
+    close($out_fh);
+    close($client);
+    print "OK.<br>";
+
+    my $extractdir = $backup_file;
+    $extractdir =~ s/(\.tar)?(\.gz)?$//g;
+
+    system( '/bin/mv', '-f', $dest, "$part/cpmove-$user.tar.gz" );
+    return ( 1, "$part/cpmove-$user.tar.gz", $extractdir, $md5sum, $pkgdebug );
+
+}
+
+sub get_current_backups {
+    my ( $host, $user, $pass ) = @_;
+
+    #look for backups
+    my %CURRENT_BACKUPS;
+
+    my ( $page, $response, %reply_headers ) = Net::SSLeay::get_https( $host, 2083, '/xml-api/cpanel?xmlin=%3Ccpanelaction%3E%3Capiversion%3E1%3C/apiversion%3E%3Cmodule%3EFileman%3C/module%3E%3Cfunc%3Elistfullbackups%3C/func%3E%3C/cpanelaction%3E', Net::SSLeay::make_headers( Authorization => 'Basic ' . MIME::Base64::encode( "$user:$pass", '' ) ) );
+    if ( $response =~ /401/ ) {
+        print "Não foi possível fazer login na conta cPanel.<br>";
+        return ( $page, $response, {} );
+    }
+
+    my $stripped_page = $page;
+    $stripped_page =~ s/\<[^\>]+\>/\n/g;    #strip xml
+    $stripped_page = Cpanel::Encoder::Tiny::safe_html_decode_str($stripped_page);
+    foreach my $req ( split( /\n/, $stripped_page ) ) {
+        if ( $req =~ /(backup-[^\"\>]+)/ ) {
+            my $file = $1;
+            $file =~ s/\s*$//g;
+            my ( $bckfile, $progress ) = split( /\s+/, $file, 2 );
+            $CURRENT_BACKUPS{$bckfile} = ( $progress =~ /progress/i ? 1 : 0 );
+        }
+    }
+
+    return ( $page, $response, \%CURRENT_BACKUPS );
+}

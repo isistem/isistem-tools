@@ -1,0 +1,158 @@
+#!/usr/bin/perl
+
+BEGIN { unshift @INC, '/usr/local/cpanel'; }
+
+use Cpanel::AcctUtils ();
+use Cpanel::Usage     ();
+use Cpanel::Validate::Username ();
+
+my $skipres  = 0;
+my $force    = 0;
+my $override = 0;
+my $path     = '';
+my $ip       = 'n';
+my $allowres = '';
+
+my %opts = (
+    'force'    => \$force,
+    'skipres'  => \$skipres,
+    'override' => \$override,
+    'ip'       => \$ip,
+);
+
+Cpanel::Usage::wrap_options( \@ARGV, \&usage, \%opts );
+my $user = $ARGV[-1];
+my $owner = $ARGV[-2];
+my $arquivo = $ARGV[-1];
+my $whm = $ARGV[-3];
+
+if ( -e $user ) {
+    ( $user, $path ) = get_user($user);
+}
+
+print "<span class='texto_padrao'>Restaurando backup do usuário $user... <div>";
+
+if ( !$force && Cpanel::AcctUtils::accountexists($user) ) {
+    print "<h5 class='ui red header'>ERRO!<br>O usuário $user já existe no servidor e o backup não foi restaurado!<div>";
+
+print "<br>";
+system("echo \"O usuário $user já existe no servidor e o backup não foi restaurado!\" > /var/log/isistemtoolsbackup/restauracao/${user}.txt");
+
+    exit();
+}
+
+if ( !$force && Cpanel::Validate::Username::group_exists( $user ) ) {
+    print "<h5 class='ui red header'>ERRO!<br>O grupo $user já existe no servidor e o backup não foi restaurado!<div>";
+
+print "<br>";
+system("echo \"O grupo $user já existe no servidor e o backup não foi restaurado!\" > /var/log/isistemtoolsbackup/restauracao/${user}.txt");
+
+    exit();
+}
+
+$ENV{'LONGUSERS'}   = 1;
+$ENV{'REMOTE_USER'} = 'root';
+$ENV{'PKGRESTORE'}  = 1;
+
+my $manual      = 1;
+system("echo -n \"\" > /var/log/isistemtoolsbackup/restauracao/${user}.txt");
+
+if ( $skipres eq 0 ) { $allowres = '--allow_reseller'; }
+if ( $force ne 0 ) { $allowres = '--force'; }
+
+$exit = `/scripts/restorepkg $allowres $force $arquivo > /var/log/isistemtoolsbackup/restauracao/${user}.txt; echo $?`;
+    
+    local $/;
+    open ARQUIVO, "</var/log/isistemtoolsbackup/restauracao/${user}.txt" or exit("<h5 class='ui red header'>ERRO!<br>Não foi possível ler o log de restauração!<div>");
+    $string = <ARQUIVO>;
+    close ARQUIVO;
+    if ( $exit eq 0 || $string =~ m/Account Restore Complete/ || $string =~ m/Account Restored/ || $string =~m/Êxito/ || $string =~ m/Account “${user}”: Success/ || $string =~ m/Success./) {
+	print "<span class='texto_padrao'>OK.<br><div>";
+    } 
+
+   else{
+
+   if ($string =~ m/primary domain is either missing or corrupt/) {
+   $RestoreError = "Backup corrompido: faltando informação sobre o usuário cPanel!";
+    }
+
+   elsif ($string =~ m/DOMAIN CONFLICT/) {
+
+   $string_owner = $string_domain = $string;
+   if($string_owner =~ m/owned by (\S+) -/){
+   $search_owner = $1;
+   }
+   if($string_domain =~ m/CONFLICT: (\S+) owned by/){
+   $search_domain = $1;
+   }
+
+   if($search_owner && $search_domain){
+   $RestoreError = "Conflito de domínio: ${search_domain} já existe e pertence ao usuário ${search_owner}!";
+   
+   }
+    
+    }
+    
+   elsif ($string =~ m/Account Creation Status: failed/) {
+   
+    $string_mysql = $string;
+    if($string_mysql =~ m/Sorry, a mysql user with the name (\S+) already exists/){
+    $search_mysql = $1;
+    }
+    $RestoreError = "Usuário já existente: um usuário do MySQL com o nome ${search_mysql} já existe!";
+    }
+    
+    else{
+   $RestoreError = "Hum... infelizmente não foi possível saber a causa do erro!";
+    }
+print "<h5 class='ui red header'>ERRO!<br>Não foi possível restaurar o backup da conta!<br><div>";
+print "<h5 class='ui red header'>${RestoreError}<br><div>";
+system("echo \"Não foi possível restaurar o backup da conta!<br>${RestoreError}\" > /var/log/isistemtoolsbackup/restauracao/${user}.txt");
+    exit();
+
+    }
+
+    if($owner ne "MESMO"){
+
+print "<span class='texto_padrao'>Mudando o proprietário da conta cPanel...  ";
+system("sed -i \"s/^OWNER=.*\$/OWNER=$owner/g\" /var/cpanel/users/$user");
+system("/usr/local/cpanel/scripts/updateuserdomains");
+print "OK.<div><br>";
+
+    }
+
+system("echo \"RESTAURAÇÃO CONCLUÍDA\" > /var/log/isistemtoolsbackup/restauracao/${user}.txt");
+
+sub usage {
+    my $prog = $0;
+    $prog =~ s{^.+/(.+)$}{$1};
+    print <<EOF;
+$prog [--force] [--skipres] [--override] [--ip=(y|n|Custom IP)] -- [cpuser|/path/to/cpuser-file]
+
+EOF
+    exit;
+}
+
+sub get_user {
+    my ($file) = @_;
+
+    my $user = '';
+    my @parts = split /\//, $file;
+    $file = pop @parts;
+    my $path = join '/', @parts;
+
+    if ( $file =~ m/^cpmove-(\S+)\.tar(?:\.gz$|$)/ ) {
+                $user = $1;
+    }
+    elsif ( $file =~ /^backup-\d+\.\d+\.\d+_\d+\-\d+\-\d+_(\S+)\.tar(?:\.gz$|$)/ ) {
+                $user = $1;
+    }
+    elsif ( $file =~ m/^(\S+)\.tar(?:\.gz$|$)/ ) {
+                $user = $1;
+    }
+    elsif ( $file =~ /cpmove-(\S+)\/?$/ ) {
+               $user = $1;
+    }
+
+    return ( $user, $path );
+}

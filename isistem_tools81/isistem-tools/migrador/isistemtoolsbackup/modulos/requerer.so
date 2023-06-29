@@ -1,0 +1,2451 @@
+#!/usr/local/cpanel/3rdparty/bin/perl
+# cpanel - scripts/pkgacct                        Copyright(c) 2015 cPanel, Inc.
+#                                                           All rights Reserved.
+# copyright@cpanel.net                                         http://cpanel.net
+# This code is subject to the cPanel license. Unauthorized copying is prohibited
+
+package Script::Pkgacct;
+
+require 5.006;
+
+my $userhomedir = ( getpwuid($>) )[7];
+
+if ( !$userhomedir || !-d $userhomedir ) {
+    print "Não foi possível obter o diretório home do usuário.<br>";
+    exit 1;
+}
+
+require "/$userhomedir/public_html/forcedbackup/config.pm";
+$ENV{'REMOTE_PASSWORD'} = $senha_cpanel;
+
+BEGIN {
+    if ( defined $ARGV[0] && $ARGV[0] eq '--allow-override' ) {
+        shift(@ARGV);
+        if ( -e '/var/cpanel/lib/Whostmgr/Pkgacct/pkgacct' && -x _ ) {
+            exec( '/var/cpanel/lib/Whostmgr/Pkgacct/pkgacct', @ARGV );
+        }
+    }
+}
+
+use Cpanel::CleanINC ();
+
+use bytes;    #required for mysqldumpdb
+
+use Try::Tiny;
+
+use Archive::Tar::Builder                ();
+use Cpanel::AccessIds::ReducedPrivileges ();
+use Cpanel::AccessIds::SetUids           ();
+use Cpanel::AdminBin                     ();
+use Cpanel::ArrayFunc                    ();
+use Cpanel::Auth::Digest::DB             ();
+use Cpanel::Auth::Digest::DB::Manage     ();
+use Cpanel::BandwidthDB                  ();
+use Cpanel::Binaries                     ();
+use Cpanel::BWFiles                      ();
+use Cpanel::BWFiles::Match               ();
+use Cpanel::ChildErrorStringifier        ();
+use Cpanel::Config::Backup               ();
+use Cpanel::Config::Httpd                ();
+use Cpanel::Config::LoadCpConf           ();
+use Cpanel::Config::LoadCpUserFile       ();
+use Cpanel::Config::userdata::ApacheConf ();
+use Cpanel::Config::userdata::Load       ();
+use Cpanel::ConfigFiles                  ();
+use Cpanel::ConfigFiles::Apache          ();
+use Cpanel::Counters                     ();
+use Cpanel::CpuWatch::Suspend            ();
+use Cpanel::DiskLib                      ();
+use Cpanel::DnsUtils::AskDnsAdmin        ();
+use Cpanel::DomainIp                     ();
+use Cpanel::Email::RoundCube             ();
+use Cpanel::Encoder::URI                 ();
+use Cpanel::Exception                    ();
+use Cpanel::ForkAsync                    ();
+use Cpanel::Filesys                      ();
+use Cpanel::FileUtils::TouchFile         ();
+use Cpanel::FileUtils::Open              ();
+use Cpanel::FileUtils::Write             ();
+use Cpanel::HttpUtils::SSL               ();
+use Cpanel::Hooks                        ();
+use Cpanel::Horde                        ();
+use Cpanel::Hulk::Constants              ();    #issafe #nomunge
+use Cpanel::IO                           ();
+use Cpanel::IP::Convert                  ();
+use Cpanel::IP::Local                    ();
+use Cpanel::ProgLang                     ();
+use Cpanel::Limits                       ();
+use Cpanel::LoadFile                     ();
+use Cpanel::LoadModule                   ();
+use Cpanel::Locale                       ();    #issafe #nomunge
+use Cpanel::Locale::Utils::3rdparty      ();    #issafe #nomunge
+use Cpanel::Locale::Utils::Display       ();    #issafe #nomunge
+use Cpanel::Logger                       ();
+use Cpanel::MD5                          ();
+use Cpanel::MysqlUtils                   ();
+use Cpanel::MysqlUtils::Dump             ();
+use Cpanel::MysqlUtils::MyCnf::Full      ();
+use Cpanel::MysqlUtils::Version          ();
+use Cpanel::Output                       ();
+use Cpanel::FileUtils::Match             ();
+use Cpanel::Pkgacct                      ();
+use Cpanel::PostgresUtils                ();
+use Cpanel::PwCache                      ();
+use Cpanel::PwDiskCache                  ();
+use Cpanel::Quota                        ();
+use Cpanel::Reseller                     ();
+use Cpanel::Rlimit                       ();
+use Cpanel::SSLPath                      ();
+use Cpanel::SSLStorage                   ();
+use Cpanel::SSLStorage::Installed        ();
+use Cpanel::SSLStorage::User             ();
+use Cpanel::SafeFile                     ();
+use Cpanel::SafeRun::Errors              ();
+use Cpanel::SafeRun::Simple              ();
+use Cpanel::SafeSync                     ();
+use Cpanel::Session::Constants           ();
+use Cpanel::SimpleSync::CORE             ();
+use Cpanel::StringFunc::Match            ();
+use Cpanel::Sys::Hostname                ();
+use Cpanel::Pkgacct::Util                ();
+use Cpanel::Pkgacct::Components::Mysql   ();
+use Cpanel::Pkgacct::Components::Quota   ();
+use Cpanel::Tar                          ();
+use Cpanel::Transaction::File::JSON      ();
+use Cpanel::Time::Local                  ();
+use Cpanel::Time::TZ                     ();
+use Cpanel::IO::Tarball                  ();
+use Cpanel::Gzip::Config                 ();
+use Cpanel::UserFiles                    ();
+use Cpanel::WebServer                    ();
+use Cpanel::WildcardDomain               ();
+use Cpanel::Lchown                       ();
+use Cpanel::Waitpid                      ();
+use Cpanel::YAML                         ();
+use Cpanel::ZoneFile                     ();
+use Cwd                                  ();
+use Fcntl                                ();
+use Getopt::Long                         ();
+use IO::Handle                           ();
+
+# This prevents strftime() from endlessly stat()ing /etc/localtime
+$ENV{'TZ'} = Cpanel::Time::TZ::calculate_TZ_env();
+
+eval {
+    local $SIG{__DIE__};
+    require Digest::MD5;
+} if !exists $INC{'Digest/MD5.pm'};
+
+if ( @ARGV && $ARGV[0] eq "--bincheck" ) {
+    print "BinCheck ok\n";
+    exit();
+}
+
+my $is_incremental;
+
+our $VERSION = '4.0';
+
+## Constant (for split files) moved to package scope variable; redefined in test script
+our $splitfile_partsize = 256_000_000;
+
+my $GENERIC_DOMAIN = 'unknown.tld';
+
+my $apacheconf = Cpanel::ConfigFiles::Apache->new();
+
+my ( $output_obj, $log_fh );
+
+#
+if ( !caller() ) {
+    my ( $return_status, $err );
+
+    try {
+        $return_status = __PACKAGE__->script(@ARGV);
+    }
+    catch {
+        $err = $_;
+        if ($output_obj) {
+            $output_obj->error( Cpanel::Exception::get_string($err), @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+        }
+        else {
+            print STDERR Cpanel::Exception::get_string($err);
+        }
+    };
+
+    my $exit_status = $return_status && !$err ? 0 : 1;
+    exit $exit_status;
+}
+
+sub script {
+    my ( $class, @argv ) = @_;
+
+    my ( $user, $tarroot, $OPTS, $new_mysql_version ) = process_args(@argv);
+
+    $output_obj = _generate_output_obj( $OPTS->{'serialized_output'} ? 1 : 0 );
+
+    my %SECURE_PWCACHE;
+    tie %SECURE_PWCACHE, 'Cpanel::PwDiskCache', 'load_callback' => \&Cpanel::PwCache::load, 'validate_callback' => \&Cpanel::PwCache::validate;
+    Cpanel::PwCache::init( \%SECURE_PWCACHE );
+
+    my $tarcfg = Cpanel::Tar::load_tarcfg();
+    my ( $status, $message ) = Cpanel::Tar::checkperm();
+    if ( !$status ) {
+        $output_obj->error($message);
+        return 0;
+    }
+
+    my $gzipcfg = Cpanel::Gzip::Config->load();
+
+    # local variables
+    my $vars = {};
+    my $loaded_signals;
+
+    my $ppid     = getppid();
+    my $httpuser = 'nobody';
+    my $httpgid  = ( getgrnam($httpuser) )[2];
+
+    #recusive, copy symlinks as symlinks, preserve permissions,
+    #preserve times, preserve devices
+
+    $| = 1;
+
+    delete $ENV{'LD_LIBRARY_PATH'};
+
+    if ( $OPTS->{'version'} ) {
+        $output_obj->out("$VERSION\n");
+        return 0;
+    }
+
+    if ( defined $tarroot ) {
+        $tarroot =~ tr{/}{}s;
+        $tarroot =~ s{/$}{};
+    }
+    $vars->{tarroot} = $tarroot;
+    $is_incremental = ( $OPTS->{'incremental'} || $ENV{'INCBACKUP'} ) ? 1 : 0;
+
+    my $create_tarball = $is_incremental ? 0 : 1;
+    my $now = time();
+
+    my @pwent;
+
+    if ( $> == 0 ) {
+        push @pwent, Cpanel::PwCache::getpwnam($user);
+    }
+    else {
+        push @pwent, split( /:/, Cpanel::AdminBin::adminrun( 'security', 'READPASSWD', $user ) );
+    }
+
+    if ( $user eq "root" ) {
+        die "You cannot copy the root user.\n";
+    }
+
+    my ( $pass, $uid, $gid, $syshomedir, $shell, $passwd_mtime, $shadow_mtime ) = @pwent[ 1, 2, 3, 7, 8, 11, 12 ];
+
+    if ( !$uid ) { _usage("Unable to get user id for user â€œ$userâ€"); }
+
+    die "Unable to load cPanel user data.\n" unless Cpanel::Config::LoadCpUserFile::has_cpuser_file($user);
+    my $cpuser_ref = Cpanel::Config::LoadCpUserFile::loadcpuserfile($user);
+    if ( !scalar keys %{$cpuser_ref} ) {
+        die "Unable to load cPanel user data.\n";
+    }
+
+    my $cpconf     = Cpanel::Config::LoadCpConf::loadcpconf();
+    my $backupconf = Cpanel::Config::Backup::load();
+
+    my $usedomainlookup = 0;
+    if ( $> == 0 ) {
+        $ENV{'USER'} = 'root';
+        $ENV{'HOME'} = '/root';
+    }
+    else {
+        require Cpanel::DomainLookup;
+        $usedomainlookup = 1;
+    }
+
+    if ( $vars->{tarroot} && substr( $vars->{tarroot}, 0, 1 ) eq "~" ) {
+        my $tuser = substr( $vars->{tarroot}, 1 );
+        $vars->{tarroot} = ( Cpanel::PwCache::getpwnam($tuser) )[7];
+    }
+
+    my $isuserbackup = 0;
+    my $isbackup     = 0;
+    my $prefix       = '';
+    if ( $OPTS->{'backup'} ) {
+        $isbackup = 1;
+        $prefix   = '';
+    }
+    elsif ( $OPTS->{'userbackup'} ) {
+        $isuserbackup = 1;
+        $isbackup     = 1;
+        my ( $sec, $min, $hour, $mday, $mon, $year, $wday, $yday, $isdst ) = localtime(time);
+        $mon++;
+        $year += 1900;
+        $sec  = sprintf( "%02d", $sec );
+        $min  = sprintf( "%02d", $min );
+        $hour = sprintf( "%02d", $hour );
+        $prefix = "backup-${mon}.${mday}.${year}_${hour}-${min}-${sec}_";
+    }
+    else {
+        $isforced = 1;
+        $prefix = 'cpmove-';
+    }
+
+    my $localzonesonly = ( defined $backupconf->{'LOCALZONESONLY'} && $backupconf->{'LOCALZONESONLY'} eq 'yes' ) ? 1 : 0;
+    my $archiveext     = 'tar.gz';
+    my $compress       = 1;
+    unless ( $OPTS->{'compress'} ) {
+        $compress   = 0;
+        $archiveext = 'tar';
+    }
+
+    $output_obj->out( "pkgacct started.\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+
+    my $backup_settings;    # provide common settings to run copy_from_backup_for_user
+    my $work_dir;
+
+    my %archive_tar_args = ( 'gnu_extensions' => 1 );
+    if ( $Archive::Tar::Builder::VERSION < 2 ) {
+        if ( my $block_factor = int( $gzipcfg->{'gzip_pigz_block_size'} * 1024 / 512 ) ) {
+            $archive_tar_args{'block_factor'} = $block_factor;
+        }
+    }
+    my $cpmove = Archive::Tar::Builder->new(%archive_tar_args);
+
+    my $split = ( $OPTS->{'split'} ? 1 : 0 );
+    my $pkg_version = 10.0;
+    my $header_message =
+        "pkgacct version $pkg_version - user : $user - tarball: $create_tarball - target mysql : "
+      . ( $new_mysql_version || 'default' )
+      . " - split: $split - incremental: $is_incremental - homedir: "
+      . ( $OPTS->{'skiphomedir'} ? 0 : 1 )
+      . " - mailman: "
+      . ( $OPTS->{'skipmailman'} ? 0 : 1 )
+      . " - backup: "
+      . ( $OPTS->{'backup'} ? 1 : 0 )
+      . " - archive version: $OPTS->{'archive_version'} - running with uid $<\n";
+
+    $output_obj->out( $header_message, @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+    $output_obj->out( "pkgacct using '" . join( ' ', $gzipcfg->command ) . "' to compress archives\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+
+    $prefix =~ s/\s//g;
+    $prefix =~ s/\n//g;
+
+    if ( !length( $vars->{tarroot} ) || !-d "$vars->{tarroot}" ) {
+        if ( $OPTS->{'backup'} ) {
+            die "Bailing out.. you must set a valid destination for backups\n";
+        }
+        $vars->{tarroot} = Cpanel::Filesys::get_homematch_with_most_free_space();
+    }
+
+    if ( $> == 0 && ( !($isbackup) ) ) {
+        my $output = Cpanel::SafeRun::Errors::saferunallerrors('/usr/local/cpanel/scripts/rdate');
+        if ( $output =~ /Could not read data/ ) {
+            $output_obj->warn( "Rdate bug detected. Please update to rdate-1.1\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+        }
+    }
+
+    $0 = "pkgacct - ${user} - av: $OPTS->{'archive_version'}";
+    if ( $> != 0 ) {
+        if ( $ENV{'REMOTE_PASSWORD'} ) {
+            $ENV{'REMOTE_USER'} = $user;
+        }
+        else {
+            if ( $OPTS->{'skipmysql'} ) {
+                $output_obj->out( "*** The REMOTE_PASSWORD variable is missing from the enviroment and we are not running with root access. ***\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+            }
+            else {
+                $output_obj->out( "*** The REMOTE_PASSWORD variable is missing from the enviroment and we are not running with root access.  MySQL backups will fail. ***\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+            }
+        }
+    }
+
+    my $homedir    = $syshomedir;
+    my $abshomedir = $homedir;      #reversed
+
+    if ( -l $homedir ) {
+        $homedir = readlink($homedir);
+    }
+
+    my $dns       = $cpuser_ref->{'DOMAIN'};
+    my $suspended = ( $cpuser_ref->{'SUSPENDED'} ? 1 : 0 );
+    my @DNS       = ($dns);
+    push @DNS, @{ $cpuser_ref->{'DOMAINS'} } if ref $cpuser_ref->{'DOMAINS'} && @{ $cpuser_ref->{'DOMAINS'} };
+    my @WWWDNS = map { 'www.' . $_ } @DNS;
+
+    my $cpargs = '-a';
+
+    my $dns_list = join( '|', map { quotemeta($_) } @DNS );
+    if ( !$dns ) {
+        die "Unable to find domain name for $user\n";
+    }
+
+    my $ip;
+    if ($usedomainlookup) {
+        require Cpanel::UserDomainIp;
+        $ip = Cpanel::UserDomainIp::getdomainip($dns);
+    }
+    else {
+        $ip = Cpanel::DomainIp::getdomainip($dns);
+    }
+    my $ssldomain = Cpanel::HttpUtils::SSL::getsslhostbyip($ip);
+
+    if ( $ssldomain && !grep { $_ eq $ssldomain } ( @WWWDNS, @DNS ) ) {
+        $ssldomain = '';
+    }
+
+    if ( !$prefix && ( $vars->{tarroot} eq '/' || $vars->{tarroot} eq '/home' || $vars->{tarroot} eq Cpanel::Filesys::get_homematch_with_most_free_space() ) ) {
+        die "Bailing out .. no prefix set and tarroot is / or /home\n";
+    }
+
+    if ( $OPTS->{'use_backups_for_speed'} ) {
+        $work_dir = $vars->{work_dir};
+        $is_incremental = $vars->{is_incremental} || 0;
+    }
+
+    if ( !$work_dir ) {
+        $work_dir = ( $is_incremental && ( $user eq 'files' || $user eq 'dirs' ) ) ? $vars->{tarroot} . "/${prefix}user_${user}" : $vars->{tarroot} . "/${prefix}${user}";
+    }
+
+    my $pkgacct = Cpanel::Pkgacct->new(
+        'is_incremental'    => $is_incremental,
+        'is_userbackup'     => $isuserbackup,
+        'is_backup'         => $isbackup,
+        'user'              => $user,
+        'new_mysql_version' => $new_mysql_version || 'default',
+        'uid'               => $uid,
+        'suspended'         => $suspended,
+        'work_dir'          => $work_dir,
+        'dns_list'          => $dns_list,
+        'domains'           => \@DNS,
+        'now'               => $now,
+        'cpconf'            => $cpconf,
+        'OPTS'              => $OPTS,
+        'output_obj'        => $output_obj,
+    );
+
+    if ( $OPTS->{'use_backups_for_speed'} ) {
+        $output_obj->out( "pkgacct -- attempting to use daily backup to create an account package\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+
+        # check improved backup system first
+        require Cpanel::Backup::Config;
+
+        my $backup_conf = Cpanel::Backup::Config::get_normalized_config();
+        if (
+               $backup_conf->{'backupenable'}
+            && $backup_conf->{'backuptype'} eq 'incremental'
+            && $backup_conf->{'backup_daily_enable'}
+
+            # try the legacy system if no backups are available for that account with the improved system
+            && -d $backup_conf->{'backupdir'} . '/incremental/accounts/' . $user
+          ) {
+            $backup_settings = {
+                backupmount => !$ENV{'INCBACKUP'} && $backup_conf->{'backupmount'},
+                backupdir   => $backup_conf->{'backupdir'},
+                basedir     => $backup_conf->{'backupdir'} . '/incremental',
+                incrementaldir => "accounts",
+            };
+        }
+        else {
+            # Check legacy backup system
+            require Cpanel::Config::Backup;
+            my $legacy_backup_conf = Cpanel::Config::Backup::load();
+
+            if ( $legacy_backup_conf->{'BACKUPENABLE'} eq 'yes' && $legacy_backup_conf->{'BACKUPINC'} eq 'yes' && $legacy_backup_conf->{'BACKUPINT'} eq 'daily' ) {
+                $output_obj->out( "pkgacct -- use legacy backup system\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+                $backup_settings = {
+                    backupmount => !$ENV{'CPBACKUP'} && $legacy_backup_conf->{'BACKUPMOUNT'},
+                    backupdir   => $legacy_backup_conf->{'BACKUPDIR'},
+                    basedir     => $legacy_backup_conf->{'BACKUPDIR'} . '/cpbackup',
+                    incrementaldir => "daily",
+                };
+            }
+        }
+
+        # variable required in copy_from_backup_for_user ( this avoid to replace all occurences of $prefix with $vars->{prefix} )
+        $vars->{prefix}         = $prefix;                   # ro access
+        $vars->{skiphomedir}    = $OPTS->{'skiphomedir'};    # ro access
+        $vars->{skipmailman}    = $OPTS->{'skipmailman'};    # ro access
+        $vars->{create_tarball} = $create_tarball;           # temporary rw access
+        $vars->{is_incremental} = $is_incremental;           # temporary rw access
+
+        if ( !copy_from_backup_for_user( $user, $backup_settings, $vars, $output_obj, $pkgacct ) ) {
+            my $msg = "could not use daily backup because no daily incremental backup for user $user can be found ( check if daily incremental backups are enabled )";
+            if ( defined $backup_settings && exists $backup_settings->{basedir} ) {
+                $msg = "could not use daily backup because it is missing ($backup_settings->{basedir}/daily/$user) ( check if backup is enabled for that account )";
+            }
+
+            $output_obj->out( "pkgacct -- $msg\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+            Cpanel::BackupMount::unmount_backup_disk( $backup_settings->{backupdir}, 'pkgacct_' . $user ) if $vars->{need_to_mount_backup};
+        }
+
+        # update/restore value
+        $create_tarball = $vars->{create_tarball};    # restore
+    }
+
+    if ($prefix) {
+        if ( -d $work_dir && !-l $work_dir ) {
+            $pkgacct->system_to_output_obj( "/bin/rm", "-rf", '--', $work_dir ) if !$is_incremental;
+        }
+        if ( -d "${work_dir}-split"
+            && !-l "${work_dir}-split" ) {
+            $pkgacct->system_to_output_obj( "/bin/rm", "-rf", '--', "${work_dir}-split" ) if $create_tarball;
+        }
+        if ( -f "${work_dir}.${archiveext}"
+            && !-l "${work_dir}.${archiveext}" ) {
+            $pkgacct->system_to_output_obj( "/bin/rm", "-rf", '--', "${work_dir}.${archiveext}" );
+        }
+    }
+
+    $output_obj->out( "pkgacct working dir : $work_dir", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+
+    my ( $pre_hook_result, $hook_msgs ) = Cpanel::Hooks::hook(
+        {
+            'category' => 'PkgAcct',
+            'event'    => 'Create',
+            'stage'    => 'pre',
+            'blocking' => 1,
+        },
+        {
+            'workdir' => $work_dir,
+            'homedir' => $homedir,
+            'user'    => $user,
+        }
+    );
+    my $hooks_msg = int @{$hook_msgs} ? join "\n", @{$hook_msgs} : '';
+    if ( !$pre_hook_result ) {
+        rmdir $work_dir or $output_obj->warn( "Could not remove directory $work_dir: $!\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+        die "Hook denied execution of pkgacct: $hooks_msg\n";
+    }
+    $output_obj->out($hooks_msg) if length $hooks_msg;
+
+    if ($isuserbackup) {
+        my $now = time();
+        if ( my $xpid = fork() ) {
+            Cpanel::Waitpid::sigsafe_blocking_waitpid($xpid);
+            if ($?) {
+                die Cpanel::ChildErrorStringifier->new($?)->autopsy();
+            }
+        }
+        else {
+            Cpanel::AccessIds::SetUids::setuids($user);
+
+            my $filename = "$homedir/$prefix$user";
+            open( my $tmpf, ">", $filename ) or die "Could not open $filename for writing: $!\n";
+            print {$tmpf} "s ${now}\n" or die "Could not write to $filename: $!\n";
+            close $tmpf or die "Could not close writing to $filename: $!\n";
+
+            my $filename2 = "$homedir/$prefix$user.$archiveext";
+            open( $tmpf, ">", $filename2 ) or die "Could not open $filename2 for writing: $!\n";
+            print {$tmpf} "s ${now}\n" or die "Could not write to $filename2: $!\n";
+            close $tmpf or die "Could not close writing to $filename2 $!\n";
+
+            exit();
+        }
+    }
+
+    if ( $create_tarball && !$split ) {
+        open( CPM, '>', "$work_dir.$archiveext" ) or die "Could not open $work_dir.$archiveext for writing: $!\n";
+        close(CPM);
+        chmod( 0600, "$work_dir.$archiveext" ) or die "Could not chmod $work_dir.$archiveext: $!\n";
+    }
+    elsif ($is_incremental) {    #add new dirs as needed
+        $pkgacct->build_pkgtree($work_dir);
+    }
+
+    if ( !-e $work_dir ) {
+        $pkgacct->build_pkgtree($work_dir);
+    }
+    elsif ( !$is_incremental ) {
+        my $part = 0;
+        while ( $part != 1024 ) {
+            if ( !-d "$work_dir.$part" ) {
+                rename( $work_dir, "$work_dir.$part" ) or die "Could not rename $work_dir to $work_dir.$part: $!";
+                $pkgacct->build_pkgtree($work_dir);
+                last;
+            }
+            $part++;
+        }
+    }
+
+    if ( !-e $work_dir || !-w _ ) {
+        die "...failed to create the working dir: $work_dir.  You can specify an alternate directory like /tmp by running [$0 $user /tmp]\n";
+    }
+
+    # Write version of pkgacct - we cannot cache this -- we have to write it every time
+    # as we have no way of knowing if the file is up to date
+    # we cannot implement an mtime check
+    if ( open( my $ver_h, '>', "$work_dir/version" ) ) {
+        print {$ver_h} "pkgacct version: $pkg_version\n";
+        print {$ver_h} "archive version: $OPTS->{'archive_version'}\n";
+        close($ver_h);
+    }
+
+    my $homedir_mtime = ( lstat($homedir) )[9];
+
+    # "$work_dir/homedir_paths" is to be deprecated in favor of "$work_dir/meta/homedir_paths"
+    # NOTE: This does NOT include the contents of cpuser HOMEDIRLINKS/HOMEDIRPATHS.
+    foreach my $file ( "$work_dir/homedir_paths", "$work_dir/meta/homedir_paths" ) {
+        if ($is_incremental) {
+            my $file_change_time = ( lstat($file) )[9];
+            next
+              if (
+                $file_change_time                  &&    #file exists
+                $homedir_mtime < $now              &&    #timewarp safety
+                $file_change_time > $homedir_mtime &&    #check to make sure the symlink or dir did not get changed on us
+                $passwd_mtime < $now               &&    #timewarp safety
+                $file_change_time > $passwd_mtime        #check to make sure their homedir did not change in the passwd file
+              );
+        }
+
+        if ( sysopen( my $home_fh, $file, &Fcntl::O_WRONLY | &Fcntl::O_CREAT | &Fcntl::O_NOFOLLOW | &Fcntl::O_TRUNC, 0600 ) ) {
+            print {$home_fh} $homedir . "\n";
+            if ( $abshomedir ne $homedir ) { print {$home_fh} $abshomedir . "\n"; }
+            close($home_fh);
+        }
+    }
+
+    my $needs_mailserver = 1;
+    if ($is_incremental) {
+        my $mailserver_mtime    = ( lstat("$work_dir/meta/mailserver") )[9];
+        my $cpanel_config_mtime = ( lstat("/var/cpanel/cpanel.config") )[9];
+        $needs_mailserver = 0
+          if (
+            $mailserver_mtime           &&    #file exists
+            $cpanel_config_mtime < $now &&    #timewarp safety
+            $mailserver_mtime < $now    &&    #timewarp safety
+            $mailserver_mtime > $cpanel_config_mtime    #check to make sure the file is newer then the cpanel config
+          );
+    }
+
+    if ( $needs_mailserver && open( my $mailserver_fh, '>', "$work_dir/meta/mailserver" ) ) {
+        print {$mailserver_fh} $cpconf->{'mailserver'} . "\n";
+        close($mailserver_fh);
+    }
+    my $ssldir = Cpanel::SSLPath::getsslroot();
+
+    if ( !$OPTS->{'skipresellerconfig'} ) {
+        $output_obj->out( "Copying Reseller Config...", @Cpanel::Pkgacct::PARTIAL_TIMESTAMP );
+        if ( $> == 0 ) {
+            Cpanel::Limits::backup_reseller_config( $user, "$work_dir/resellerconfig" );
+            Cpanel::Limits::backup_reseller_limits( $user, "$work_dir/resellerconfig" );
+
+            if ( Cpanel::Reseller::isreseller($user) ) {
+                $output_obj->out( "\nCopying Reseller Packages and Features ...\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+                Cpanel::Limits::backup_reseller_belongings( $user, 'packages', "$work_dir/resellerpackages" );
+                Cpanel::Limits::backup_reseller_belongings( $user, 'features', "$work_dir/resellerfeatures" );
+            }
+        }
+        $output_obj->out( "Done\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+    }
+
+    $output_obj->out( "Copying Suspension Info (if needed)...", @Cpanel::Pkgacct::PARTIAL_TIMESTAMP );
+    _syncfile_or_warn( $output_obj, "/var/cpanel/suspended/$user",      "$work_dir/suspended" );
+    _syncfile_or_warn( $output_obj, "/var/cpanel/suspended/$user.lock", "$work_dir/suspended" );
+    _syncfile_or_warn( $output_obj, "/var/cpanel/suspendinfo/$user",    "$work_dir/suspendinfo" );
+    $output_obj->out( "Done\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+
+    if ( !$OPTS->{'skipssl'} ) {
+        $output_obj->out( "Copying SSL certificates, CSRs, and keys...", @Cpanel::Pkgacct::PARTIAL_TIMESTAMP );
+        backup_ssl_for_user( $user, $work_dir, $output_obj );
+        $output_obj->out( "Done\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+
+## case 38355: the cpmove/ssldomain file is only needed when moving from an older to a newer server
+        $output_obj->out( "Storing SSL domain......", @Cpanel::Pkgacct::PARTIAL_TIMESTAMP );
+        sysopen( SH, "$work_dir/ssldomain", &Fcntl::O_WRONLY | &Fcntl::O_CREAT | &Fcntl::O_NOFOLLOW | &Fcntl::O_TRUNC, 0600 );
+        if ( length $ssldomain ) {
+            syswrite( SH, $ssldomain, length $ssldomain );
+        }
+        close(SH);
+        $output_obj->out( "Done\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+    }
+
+    $output_obj->out( "Copying Domain Keys....", @Cpanel::Pkgacct::PARTIAL_TIMESTAMP );
+
+    my $domainkeys_dir = $Cpanel::ConfigFiles::DOMAIN_KEYS_ROOT;
+    foreach my $domain ( $dns, @{ $cpuser_ref->{'DOMAINS'} } ) {
+        if ( -e "$domainkeys_dir/public/$domain" ) {
+            _syncfile_or_warn( $output_obj, "$domainkeys_dir/public/$domain", "$work_dir/domainkeys/public/" );
+        }
+
+        if ( -e "$domainkeys_dir/private/$domain" ) {
+            _syncfile_or_warn( $output_obj, "$domainkeys_dir/private/$domain", "$work_dir/domainkeys/private/" );
+        }
+    }
+
+    $output_obj->out( "Done\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+
+    $output_obj->out( "Copying Counter Data....", @Cpanel::Pkgacct::PARTIAL_TIMESTAMP );
+    my ( $c_ok, $counters_ar ) = Cpanel::Counters::list_user_counters($user);
+    if ($c_ok) {
+        for my $counter (@$counters_ar) {
+            my ( $val_ok, $val ) = Cpanel::Counters::get_user_counter_value( $user, $counter );
+            if ($val_ok) {
+                Cpanel::FileUtils::Write::writefile( "$work_dir/counters", "$val\n", 0640 );
+            }
+        }
+    }
+
+    $output_obj->out( "Done\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+
+    if ( !$OPTS->{'skipbwdata'} ) {
+        $output_obj->out( "Copying Bandwidth Data....", @Cpanel::Pkgacct::PARTIAL_TIMESTAMP );
+        copy_bandwidth_data_to_work_dir( $user, $work_dir, $output_obj );
+
+        $output_obj->out( "Done\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+    }
+
+    if ( !$OPTS->{'skipdnszones'} ) {
+        $output_obj->out( "Copying Dns Zones....", @Cpanel::Pkgacct::PARTIAL_TIMESTAMP );
+        if ( $> == 0 ) {
+            my %local_ips = map { Cpanel::IP::Convert::expand_ip( $_, 6 ) => 1 } Cpanel::IP::Local::get_local_systems_public_ips();
+            my %related_ips;
+            my %ZONES;
+            my $encoded_zones = Cpanel::DnsUtils::AskDnsAdmin::askdnsadmin( 'GETZONES', $localzonesonly, join( ',', @DNS ) );
+            foreach my $zonedata ( split( /\&/, $encoded_zones ) ) {
+                my ( $name, $value ) = split( /=/, $zonedata );
+                next if ( !$name );
+                $name =~ s/^cpdnszone-//g;
+                $name = Cpanel::Encoder::URI::uri_decode_str($name);
+                $output_obj->out( "...$name...", @Cpanel::Pkgacct::PARTIAL_MESSAGE );
+                if ( length($value) > 10 ) {
+                    my $temp = Cpanel::Encoder::URI::uri_decode_str($value);
+                    my $zone_obj;
+                    if ( eval { $zone_obj = Cpanel::ZoneFile->new( domain => $name, text => $temp ); 1; } ) {
+                        foreach my $record ( @{ $zone_obj->{'dnszone'} } ) {
+                            if ( $record->{'address'} ) {
+                                my $expanded_ip = Cpanel::IP::Convert::expand_ip( $record->{'address'}, 6 );
+                                if ( $local_ips{$expanded_ip} ) {
+                                    $related_ips{$expanded_ip} = 1;
+                                }
+                            }
+                        }
+                    }
+                    else {
+                        Cpanel::Logger::warn("Unable to parse dns zone: $@");
+                        $output_obj->warn( "Unable to parse dns zone: $@", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+                    }
+                    if ( sysopen( my $zone_fh, "$work_dir/dnszones/$name.db", &Fcntl::O_WRONLY | &Fcntl::O_CREAT | &Fcntl::O_NOFOLLOW | &Fcntl::O_TRUNC, 0600 ) ) {
+                        syswrite( $zone_fh, $temp, length $temp );
+                        close($zone_fh);
+                    }
+                    else {
+                        Cpanel::Logger::warn("Unable to write dnszones/$name.db: $!");
+                        $output_obj->warn( "Unable to write dnszones/$name.db: $!", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+                    }
+                }
+            }
+
+            # This file is expected to be used to make better decisions about which
+            # IPs should be treated as local IPs and which ones should be treated
+            # as remote IPs for the purposes of restoring the account.
+            if ( sysopen( my $ip_fh, "$work_dir/ips/related_ips", &Fcntl::O_WRONLY | &Fcntl::O_CREAT | &Fcntl::O_NOFOLLOW | &Fcntl::O_TRUNC, 0600 ) ) {
+                syswrite( $ip_fh, join( "\n", sort keys %related_ips ) );
+                close($ip_fh);
+            }
+            else {
+                Cpanel::Logger::warn("Unable to write related_ips: $!");
+                $output_obj->warn( "Unable to write related_ips: $!", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+            }
+        }
+        $output_obj->out( "Done\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+    }
+
+    if ( !$OPTS->{'skipmailconfig'} ) {
+        $output_obj->out( "Copying Mail files....", @Cpanel::Pkgacct::PARTIAL_TIMESTAMP );
+        foreach my $domain (@DNS) {
+            if ( -e "$Cpanel::ConfigFiles::VALIASES_DIR/${domain}" ) {
+
+                _syncfile_or_warn( $output_obj, "$Cpanel::ConfigFiles::VALIASES_DIR/${domain}", "$work_dir/va" );
+                if ( $OPTS->{'skipmailman'} ) {
+                    my $valiases_content = Cpanel::LoadFile::loadfileasarrayref("$work_dir/va/$domain");
+                    chomp @{$valiases_content};
+                    Cpanel::FileUtils::Write::writefile( "$work_dir/va/$domain", ( join "\n", ( grep { !_is_mailman_valias($_) } @{$valiases_content} ) ) . "\n", 0640 );
+                }
+            }
+            if ( -e "$Cpanel::ConfigFiles::VDOMAINALIASES_DIR/${domain}" ) {
+                _syncfile_or_warn( $output_obj, "$Cpanel::ConfigFiles::VDOMAINALIASES_DIR/${domain}", "$work_dir/vad" );
+            }
+            if ( -e "$Cpanel::ConfigFiles::VFILTERS_DIR/${domain}" ) {
+                _syncfile_or_warn( $output_obj, "$Cpanel::ConfigFiles::VFILTERS_DIR/${domain}", "$work_dir/vf" );
+            }
+        }
+        $output_obj->out( "Done\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+    }
+
+    if ( !$OPTS->{'skipftpusers'} ) {
+        $output_obj->out( "Copying proftpd file....", @Cpanel::Pkgacct::PARTIAL_TIMESTAMP );
+        if ( $> == 0 ) {
+            if ( $suspended && -e "$Cpanel::ConfigFiles::FTP_PASSWD_DIR/${user}.suspended" ) {
+                _syncfile_or_warn( $output_obj, "$Cpanel::ConfigFiles::FTP_PASSWD_DIR/${user}.suspended", "$work_dir/proftpdpasswd" );
+            }
+            else {
+                _syncfile_or_warn( $output_obj, "$Cpanel::ConfigFiles::FTP_PASSWD_DIR/${user}", "$work_dir/proftpdpasswd" );
+            }
+        }
+        else {
+            $pkgacct->simple_exec_into_file( "$work_dir/proftpdpasswd", [ '/usr/local/cpanel/bin/ftpwrap', 'DUMP', '0', '0' ] );
+        }
+        $output_obj->out( "Done\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+    }
+
+    if ( !$OPTS->{'skiplogs'} ) {
+        $output_obj->out( "Copying www logs....", @Cpanel::Pkgacct::PARTIAL_TIMESTAMP );
+        my $log_regex_list = '^(?:' . join( '|', map { quotemeta($_) . '$', quotemeta( 'www.' . $_ ) . '$', quotemeta( 'ftp.' . $_ ) . '$', quotemeta($_) . '-', quotemeta( 'www.' . $_ ) . '-', quotemeta( 'ftp.' . $_ ) . '-' } @DNS ) . ')';
+        my $log_regex      = qr{$log_regex_list};
+        my $total_log_size = 0;
+        my @logfiles;
+        if ( opendir( my $domlog_dh, $apacheconf->dir_domlogs() ) ) {
+            @logfiles = map { $total_log_size += ( stat( $apacheconf->dir_domlogs() . "/$_" ) )[7]; $_; } grep { $_ =~ $log_regex } readdir($domlog_dh);
+            closedir($domlog_dh);
+        }
+
+        if (@logfiles) {    #only fork if we have log files to copy
+            my $log_file_copy_ref = sub {
+## TODO?: should this copy over domlogs in $user dir as well?
+                ## No they are just links -jnk 4.29.10
+                foreach my $logfile (@logfiles) {
+                    $output_obj->out( "...$logfile...", @Cpanel::Pkgacct::PARTIAL_MESSAGE );
+                    _syncfile_or_warn( $output_obj, $apacheconf->dir_domlogs() . "/$logfile", "$work_dir/logs", 0, 0, 1 );
+                }
+            };
+
+            $output_obj->out( "...log file sizes [$total_log_size byte(s)]...", @Cpanel::Pkgacct::PARTIAL_MESSAGE );
+
+            if ( $total_log_size < ( 1024 * 1024 * 6 ) ) {    #no forking if less then < 6meg
+                $log_file_copy_ref->();
+            }
+            else {
+                $pkgacct->run_dot_event(
+                    sub {
+                        $0 = "pkgacct - ${user} - log copy child";
+                        $log_file_copy_ref->();
+                    },
+                );
+            }
+        }
+        $output_obj->out( "Done\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+    }
+
+    {
+        my ( $userconfig, $userconfig_work ) = ( Cpanel::UserFiles::userconfig_path($user), "$work_dir/userconfig" );
+        mkdir($userconfig_work) unless -d $userconfig_work;
+
+        if ( opendir( my $dh, $userconfig ) ) {
+            $output_obj->out( 'Copy userconfig...', @Cpanel::Pkgacct::PARTIAL_TIMESTAMP );
+
+            my @files = map { "$userconfig/$_" } grep { $_ ne '.' && $_ ne '..' } readdir($dh);
+
+            close($dh);
+
+            foreach my $file (@files) {
+                _syncfile_or_warn( $output_obj, $file, $userconfig_work );
+            }
+
+            $output_obj->out( "Done\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+        }
+    }
+
+    if ( !$OPTS->{'skipuserdata'} ) {
+        $output_obj->out( 'Copy userdata...', @Cpanel::Pkgacct::PARTIAL_TIMESTAMP );
+        backup_userdata_for_user( $user, $work_dir, $output_obj, $pkgacct );
+        $output_obj->out( "Done\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+    }
+
+    if ( !$OPTS->{'skipvhosttemplates'} ) {
+        $output_obj->out( 'Copy custom virtualhost templates...', @Cpanel::Pkgacct::PARTIAL_TIMESTAMP );
+        my @sync_list;
+        my @mkdir_list;
+        my $main_userdata = Cpanel::Config::userdata::Load::load_userdata( $user, 'main' );
+        my $base = $apacheconf->dir_conf_userdata();
+        foreach my $domain ( $main_userdata->{main_domain}, @{ $main_userdata->{sub_domains} }, keys %{ $main_userdata->{addon_domains} } ) {
+            next if !$domain;
+            foreach my $path ( "$base/ssl/1/$user/$domain/", "$base/ssl/2/$user/$domain/", "$base/std/1/$user/$domain/", "$base/std/2/$user/$domain/" ) {
+                if ( -e $path ) {
+                    if ( $path =~ m{(s(?:(?:td)|(?:sl)))/([12])} ) {
+                        my $proto = $1;
+                        my $ver   = $2;
+                        push @mkdir_list, "$work_dir/httpfiles/$proto/", "$work_dir/httpfiles/$proto/$ver/", "$work_dir/httpfiles/$proto/$ver/$domain/";
+                        if ( opendir( my $dir_fh, $path ) ) {
+                            push @sync_list, map { [ $path . '/' . $_, "$work_dir/httpfiles/$proto/$ver/$domain/$_" ] } grep { !/^\./ } readdir($dir_fh);
+                            closedir($dir_fh);
+                        }
+                    }
+                }
+            }
+        }
+        if (@sync_list) {    #only fork if we have to
+            $pkgacct->run_dot_event(
+                sub {
+                    $0 = "pkgacct - ${user} - custom virtualhost templates copy child";
+                    foreach my $dir (@mkdir_list) {
+                        mkdir( $dir, 0700 );
+                    }
+                    foreach my $sync_ref (@sync_list) {
+                        _syncfile_or_warn( $output_obj, $sync_ref->[0], $sync_ref->[1] );
+                    }
+                },
+            );
+        }
+        $output_obj->out( "Done\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+    }
+
+    if ( !$OPTS->{'skipmailman'} ) {
+
+        $output_obj->out( "Copying mailman lists and archives....", @Cpanel::Pkgacct::PARTIAL_TIMESTAMP );
+
+        my %LISTTARGETS;
+        if ( $> == 0 ) {
+            if ( -r "$Cpanel::ConfigFiles::MAILMAN_ROOT/lists" ) {
+                $LISTTARGETS{'mm'} = Cpanel::FileUtils::Match::get_matching_files( "$Cpanel::ConfigFiles::MAILMAN_ROOT/lists", "_(?:$dns_list)" . '$' );
+            }
+            if ( -r "$Cpanel::ConfigFiles::MAILMAN_ROOT/suspended.lists" ) {
+                $LISTTARGETS{'mma'} = Cpanel::FileUtils::Match::get_matching_files( "$Cpanel::ConfigFiles::MAILMAN_ROOT/suspended.lists", "_(?:$dns_list)" . '$' );
+            }
+            if ( -r "$Cpanel::ConfigFiles::MAILMAN_ROOT/archives/private" ) {
+                $LISTTARGETS{'mma/priv'} = Cpanel::FileUtils::Match::get_matching_files( "$Cpanel::ConfigFiles::MAILMAN_ROOT/archives/private", "_(?:$dns_list)" . '(?:\.mbox)?$' );
+            }
+        }
+
+        my $mailman_file_copy = sub {
+            foreach my $target ( keys %LISTTARGETS ) {
+                my $file_list = $LISTTARGETS{$target};
+                if ( ref $file_list && @$file_list ) {
+                    foreach my $dir (@$file_list) {
+                        my @path = split( /\/+/, $dir );
+                        my $base_file = pop @path;
+                        mkdir( $work_dir . '/' . $target . '/' . $base_file, 0700 ) if !-e $work_dir . '/' . $target . '/' . $base_file;
+                        Cpanel::SafeSync::safesync(
+                            'user'     => 'mailman',
+                            'source'   => $dir,
+                            'dest'     => $work_dir . '/' . $target . '/' . $base_file,
+                            'chown'    => 0,
+                            'isbackup' => ( $isbackup || $isuserbackup ),
+                            'delete'   => $is_incremental,
+                            'verbose'  => 0
+                        );
+                    }
+                }
+            }
+        };
+
+        if ( $#{ $LISTTARGETS{'mma/priv'} } <= 1 ) {    #no forking if only one file
+            $mailman_file_copy->();
+        }
+        else {
+            $pkgacct->run_dot_event(
+                sub {
+                    $0 = "pkgacct - ${user} - mailman copy child";
+                    $mailman_file_copy->();
+                },
+            );
+        }
+
+        $output_obj->out( "Done copying mailman lists and archives.\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+    }
+    else {
+        $output_obj->out( "Copying mailman lists and archives skipped (--skipmailman set)....\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+    }
+
+    my $htaccess_files = {};
+    if ( !$OPTS->{'skiphomedir'} ) {
+
+        homedir_block(
+            'work_dir'       => $work_dir,
+            'gid'            => $gid,
+            'isbackup'       => $isbackup,
+            'isuserbackup'   => $isuserbackup,
+            'homedir'        => $homedir,
+            'prefix'         => $prefix,
+            'user'           => $user,
+            'is_incremental' => $is_incremental,
+            'tarcfg'         => $tarcfg,
+            'gzipcfg'        => $gzipcfg,
+            'cpmove'         => $cpmove,
+            'output_obj'     => $output_obj,
+            'pkgacct'        => $pkgacct,
+        );
+
+        # If we're using EA4, we want to strip out the handler blocks
+        # that we may have added.  restorepkg on the destination
+        # server will try to add them back.
+        if ( !$is_incremental ) {
+            $htaccess_files = _strip_ea4_htaccess_blocks( $user, $work_dir, $output_obj );
+
+            # We don't want to include our staging directory for the
+            # modified .htaccess files in the archive, and we also
+            # want the original files to not be included either -
+            # we'll put our new files in their places.
+            $cpmove->exclude("$work_dir/htaccess") if -d "$work_dir/htaccess";
+            for my $file ( keys %$htaccess_files ) {
+                $cpmove->exclude( $htaccess_files->{$file} );
+                $htaccess_files->{$file} =~ s~\Q$homedir\E~$prefix$user/homedir~;
+            }
+        }
+
+        # We don't need nobody file if we don't need the homedir
+
+        $output_obj->out( "Calculating nobody files...", @Cpanel::Pkgacct::PARTIAL_TIMESTAMP );
+        $pkgacct->run_dot_event(
+            sub {
+                notate_homedir_nobodyfiles( $homedir, $work_dir, $user );
+            },
+        );
+        $output_obj->out( "Done\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+    }
+
+    # Record db map status as off, even if we have it on.
+    # This is because, as of 11.44, a single account could have
+    # a combination of prefixed and unprefixed databases.
+    if ( -e '/var/cpanel/cpanel.config' ) {
+        if ( open( my $fh, '>', "$work_dir/meta/dbprefix" ) ) {
+            print {$fh} 0;
+            close $fh;
+        }
+    }
+
+    if ( open( my $fh, '>', "$work_dir/meta/hostname" ) ) {
+        print {$fh} Cpanel::Sys::Hostname::gethostname();
+        close $fh;
+    }
+
+    $pkgacct->perform_component('Postgresql') if !$OPTS->{'skippgsql'};
+    $pkgacct->perform_component('Mysql')      if !$OPTS->{'skipmysql'};
+
+    $output_obj->out( "Copying cpuser file.......", @Cpanel::Pkgacct::PARTIAL_TIMESTAMP );
+    _syncfile_or_warn( $output_obj, "/var/cpanel/users/$user", "$work_dir/cp" );
+    $output_obj->out( "Done\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+
+    $output_obj->out( "Copying crontab file.......", @Cpanel::Pkgacct::PARTIAL_TIMESTAMP );
+    my $copied_cron = 0;
+    foreach my $path (qw{/var/cron/tabs /var/spool/cron /var/spool/fcron /var/spool/cron.suspended}) {
+        if ( -r "$path/$user" ) {
+            _syncfile_or_warn( $output_obj, "$path/$user", "$work_dir/cron" );
+            $copied_cron = 1;
+            last;
+        }
+    }
+    if ( !$copied_cron && $> != 0 ) {
+        $pkgacct->simple_exec_into_file( "$work_dir/cron/$user", [ 'crontab', '-l' ] );
+    }
+    $output_obj->out( "Done\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+
+    $pkgacct->perform_component('Quota')       if !$OPTS->{'skipquota'};
+    $pkgacct->perform_component('Integration') if !$OPTS->{'skipintegrationlinks'};
+    $pkgacct->perform_component('AuthnLinks')  if !$OPTS->{'skipauthnlinks'};
+
+    my $domain_data_backup_is_current = 0;
+    if ($is_incremental) {
+        my $http_now         = time();
+        my $httpdconf        = $apacheconf->file_conf();
+        my $httpd_conf_mtime = ( stat($httpdconf) )[9];
+        if ( $httpd_conf_mtime < $http_now ) {
+            my $newest_domain_file_mtime = 0;
+            foreach my $domain_file ( "$work_dir/sds", "$work_dir/sds2", "$work_dir/pds", "$work_dir/addons" ) {
+                if ( ( stat($domain_file) )[9] > $newest_domain_file_mtime ) {
+                    $newest_domain_file_mtime = ( stat(_) )[9];
+                }
+            }
+            if ( $httpd_conf_mtime < $newest_domain_file_mtime ) {
+                $domain_data_backup_is_current = 1;
+            }
+        }
+    }
+
+    if ( !$OPTS->{'skipdomains'} ) {
+        if ($domain_data_backup_is_current) {
+            $output_obj->out( "Domain data backup is already current....Done\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+        }
+        else {
+            $output_obj->out( "Storing Subdomains....\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+            my %SUBS;
+            if ($usedomainlookup) {
+                %SUBS = Cpanel::DomainLookup::listsubdomains();    #domainlookup  takes no args
+            }
+            else {
+
+                #yes abshomedir and homedir are reversed here.
+                %SUBS = Cpanel::Config::userdata::ApacheConf::listsubdomains( $user, @DNS, @WWWDNS );
+            }
+            sysopen( SH, "$work_dir/sds", &Fcntl::O_WRONLY | &Fcntl::O_CREAT | &Fcntl::O_NOFOLLOW | &Fcntl::O_TRUNC, 0600 );
+            foreach my $sd ( keys %SUBS ) {
+                syswrite( SH, "$sd\n", length "$sd\n" );
+            }
+            close(SH);
+
+            sysopen( SH, "$work_dir/sds2", &Fcntl::O_WRONLY | &Fcntl::O_CREAT | &Fcntl::O_NOFOLLOW | &Fcntl::O_TRUNC, 0600 );
+            foreach my $sd ( keys %SUBS ) {
+                my $basedir = $SUBS{$sd};
+                $basedir =~ s/^$homedir\/?//g;
+                $basedir =~ s/^$syshomedir\/?//g;
+                my $temp = "$sd=$basedir\n";
+                syswrite( SH, $temp, length $temp );
+            }
+            close(SH);
+
+            $output_obj->out( "Done\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+
+            $output_obj->out( "Storing Parked Domains....\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+            my %SDS;
+            if ($usedomainlookup) {
+                %SDS = Cpanel::DomainLookup::getparked($dns);
+            }
+            else {
+                %SDS = Cpanel::Config::userdata::ApacheConf::getparked($dns);
+            }
+
+            sysopen( SH, "$work_dir/pds", &Fcntl::O_WRONLY | &Fcntl::O_CREAT | &Fcntl::O_NOFOLLOW | &Fcntl::O_TRUNC, 0600 );
+            foreach my $sd ( keys %SDS ) {
+                my $temp = "$sd\n";
+                syswrite( SH, $temp, length $temp );
+            }
+            close(SH);
+            $output_obj->out( "Done\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+
+            $output_obj->out( "Storing Addon Domains....\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+            my (@PSUBS);
+            my ( %PN, %FN, $pname, $fname );
+
+            foreach ( keys %SUBS ) {
+                $fname = $_;
+                s/_/\./g;
+                $FN{$_} = $fname;
+                push( @PSUBS, $_ );
+            }
+
+            my %PARKED;
+            if ($usedomainlookup) {
+                %PARKED = Cpanel::DomainLookup::getmultiparked(@PSUBS);
+            }
+            else {
+                %PARKED = Cpanel::Config::userdata::ApacheConf::getaddon($user);
+            }
+            sysopen( SH, "$work_dir/addons", &Fcntl::O_WRONLY | &Fcntl::O_CREAT | &Fcntl::O_NOFOLLOW | &Fcntl::O_TRUNC, 0600 );
+            foreach my $subdomain ( keys %PARKED ) {
+                foreach my $parked ( keys %{ $PARKED{$subdomain} } ) {
+                    my $temp = "$parked=$FN{$subdomain}\n";
+                    syswrite( SH, $temp, length $temp );
+                }
+            }
+
+            close(SH);
+        }
+    }
+
+    if ( !$OPTS->{'skippasswd'} ) {
+
+        #passwd_mtime
+        $output_obj->out( "Copying password.......", @Cpanel::Pkgacct::PARTIAL_TIMESTAMP );
+        my $shadow_file_backup_mtime = $is_incremental ? ( ( stat("$work_dir/shadow") )[9] || -1 ) : -1;
+        if ( $shadow_file_backup_mtime <= $shadow_mtime || $shadow_file_backup_mtime >= $now ) {
+            if ( sysopen( my $shadow_fh, "$work_dir/shadow", &Fcntl::O_WRONLY | &Fcntl::O_CREAT | &Fcntl::O_NOFOLLOW | &Fcntl::O_TRUNC, 0600 ) ) {
+                chmod( 0600, "$work_dir/shadow" );
+                syswrite( $shadow_fh, $pass, length $pass );
+                close($shadow_fh);
+            }
+        }
+
+        my $digestauth_mtime = ( stat($Cpanel::Auth::Digest::DB::file) )[9];
+        if ($digestauth_mtime) {
+            my $digestshadow_file_backup_mtime = $is_incremental ? ( ( stat("$work_dir/digestshadow") )[9] || -1 ) : -1;
+            if ( $digestshadow_file_backup_mtime <= $digestauth_mtime || $digestshadow_file_backup_mtime >= $now ) {
+                my $digestpass = -r $Cpanel::Auth::Digest::DB::file ? Cpanel::Auth::Digest::DB::Manage::get_entry($user) : Cpanel::AdminBin::adminrun( 'security', 'READDIGEST', $user );
+                if ( sysopen( my $shadow_fh, "$work_dir/digestshadow", &Fcntl::O_WRONLY | &Fcntl::O_CREAT | &Fcntl::O_NOFOLLOW | &Fcntl::O_TRUNC, 0600 ) ) {
+                    chmod( 0600, "$work_dir/digestshadow" );
+                    if ( length $digestpass ) {
+                        syswrite( $shadow_fh, $digestpass, length $digestpass );
+                    }
+                    close($shadow_fh);
+                }
+            }
+        }
+
+        $output_obj->out( "Done\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+    }
+
+    if ( !$OPTS->{'skipshell'} ) {
+        $output_obj->out( "Copying shell.......", @Cpanel::Pkgacct::PARTIAL_TIMESTAMP );
+        my $shell_file_backup_mtime = $is_incremental ? ( ( stat("$work_dir/shell") )[9] || -1 ) : -1;
+        if ( $shell_file_backup_mtime <= $passwd_mtime || $shell_file_backup_mtime >= $now ) {
+            if ( sysopen( my $shell_fh, "$work_dir/shell", &Fcntl::O_WRONLY | &Fcntl::O_CREAT | &Fcntl::O_NOFOLLOW | &Fcntl::O_TRUNC, 0600 ) ) {
+                syswrite( $shell_fh, $shell, length $shell );
+                close($shell_fh);
+            }
+        }
+        $output_obj->out( "Done\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+    }
+
+    if ( !$OPTS->{'skiplocale'} ) {
+        if ( $> == 0 ) {
+            export_non_cpanel_locale( $user, $work_dir, $cpuser_ref, $output_obj, $pkgacct );
+        }
+        else {
+            $output_obj->warn( "Exporting of the user's locale must be done as root.\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+        }
+    }
+
+    my $hook_context = {
+        'workdir'        => $work_dir,
+        'homedir'        => $homedir,
+        'user'           => $user,
+        'is_incremental' => $is_incremental,
+        'is_split'       => $split,
+        'is_tarball'     => $create_tarball,
+        'is_backup'      => $isbackup,
+    };
+    Cpanel::Hooks::hook(
+        {
+            'category' => 'PkgAcct',
+            'event'    => 'Create',
+            'stage'    => 'preFinalize',
+        },
+        $hook_context
+    );
+
+    chdir( $vars->{tarroot} );
+
+    $output_obj->out( "Creating Archive ....", @Cpanel::Pkgacct::PARTIAL_TIMESTAMP );
+    Cpanel::Rlimit::set_rlimit_to_infinity();
+    $homedir = undef if $OPTS->{'skiphomedir'};
+    my $prefix_user = "${prefix}${user}";
+    if ($create_tarball) {
+        ## e.g. invoked as './usr/local/cpanel/scripts/pkgacct $user "" userbackup'
+        ##   - or - './usr/local/cpanel/scripts/pkgacct $user /tmp backup'
+        if ($isbackup) {
+            my $destfile = "$prefix_user.${archiveext}";
+
+            write_cpmove_archive(
+                'prefix_user' => $prefix_user,
+                'homedir'     => $homedir,
+                'work_dir'    => $work_dir,
+                'cpmove'      => $cpmove,
+                'gzipcfg'     => $gzipcfg,
+                'file'        => $destfile,
+                'user'        => $user,
+                'compress'    => $compress,
+                'htaccess'    => $htaccess_files,
+                'output_obj'  => $output_obj,
+            );
+        }
+        else {
+            my $exit_status;
+
+            ## e.g. invoked as './usr/local/cpanel/scripts/pkgacct $user "" --split'
+            if ($split) {
+                $exit_status = handle_dir_to_splitfiles(
+                    'homedir'     => $homedir,
+                    'work_dir'    => $work_dir,
+                    'prefix_user' => $prefix_user,
+                    'cpmove'      => $cpmove,
+                    'gzipcfg'     => $gzipcfg,
+                    'archiveext'  => $archiveext,
+                    'user'        => $user,
+                    'compress'    => $compress,
+                    'htaccess'    => $htaccess_files,
+                    'output_obj'  => $output_obj,
+                    'pkgacct'     => $pkgacct,
+                );
+            }
+            else {
+                ## e.g. invoked as './usr/local/cpanel/scripts/pkgacct $user'
+                my $destfile = "$prefix_user.${archiveext}";
+
+                $exit_status = write_cpmove_archive(
+                    'prefix_user' => $prefix_user,
+                    'homedir'     => $homedir,
+                    'work_dir'    => $work_dir,
+                    'cpmove'      => $cpmove,
+                    'gzipcfg'     => $gzipcfg,
+                    'file'        => $destfile,
+                    'user'        => $user,
+                    'compress'    => $compress,
+                    'htaccess'    => $htaccess_files,
+                    'output_obj'  => $output_obj,
+                );
+            }
+
+            if ($exit_status) {
+                $output_obj->error( "\nERROR: tar of archive returned error $exit_status\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+                return 0;
+            }
+        }
+
+        if ( -d $work_dir && !-l $work_dir ) {
+            $pkgacct->system_to_output_obj( "/bin/rm", "-rf", '--', $work_dir );
+        }
+    }
+
+    $output_obj->out( "Done\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+
+    if ( !$split && $create_tarball ) {
+        $output_obj->out( "pkgacctfile is: $work_dir.$archiveext\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+        $hook_context->{'tarball'} = "$work_dir.$archiveext";
+    }
+    elsif ($is_incremental) {
+        ## note: nothing seems to capture this, in the way that the other messages are
+        ##   captured by Whostmgr::Remote
+        $output_obj->out( "pkgacct target is: $work_dir\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+    }
+
+    if ( $create_tarball && !$split ) {
+        if ( !$ENV{'CPBACKUP'} ) {
+
+            # If we are doing a cpbackup we do not calculate the md5 sum
+            # as we are just going to throw it away
+            my $md5sum = Cpanel::MD5::getmd5sum("$work_dir.$archiveext");
+            $output_obj->out( "md5sum is: $md5sum\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+            $hook_context->{'md5sum'} = $md5sum;
+        }
+        my $size = ( stat("$work_dir.$archiveext") )[7];
+        $hook_context->{'size'} = $size;
+        $output_obj->out( "\nsize is: $size\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+    }
+
+    unless ( $OPTS->{'skiphomedir'} ) {
+        my $homesize = (
+            Cpanel::Quota::displayquota(
+                {
+                    'bytes'           => 1,
+                    'include_sqldbs'  => 0,
+                    'include_mailman' => 0,
+                    'user'            => $user
+                }
+            )
+        )[0];
+
+        Cpanel::Hooks::hook(
+            {
+                'category' => 'PkgAcct',
+                'event'    => 'Create',
+                'stage'    => 'postFinalize',
+            },
+            $hook_context
+        );
+
+        #
+        # Fall back to 'du -s' in case there was no quota information available
+        # for the current user.
+        #
+        unless ($homesize) {
+            my $du = qx( du -s $homedir );
+            my ($homesize_kb) = ( $du =~ m/^(\d+)/ );
+            $homesize = $homesize_kb * 1024;
+        }
+
+        $output_obj->out( "\nhomesize is: $homesize\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+    }
+
+    if ( $vars->{need_to_mount_backup} ) {
+        require Cpanel::BackupMount;
+        Cpanel::BackupMount::unmount_backup_disk( $backup_settings->{backupdir}, 'pkgacct_' . $user );
+    }
+
+    $output_obj->out( "pkgacct completed\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+
+    return 1;
+}
+
+#This is tested separately with the idea that, eventually, a refactor
+#of pkgacct will allow all of these pieces of the account backup logic
+#to be tested like this rather than monolithically.
+#
+sub copy_bandwidth_data_to_work_dir {
+    my ( $user, $work_dir, $output_obj ) = @_;
+
+    $output_obj->out( "Summary databases â€¦", @Cpanel::Pkgacct::PARTIAL_MESSAGE );
+
+    _save_bandwidth_data_to_dest( $user, "$work_dir/bandwidth_db.json", $output_obj );
+
+    $output_obj->out(" done!\n");
+
+    return 1;
+}
+
+sub _save_bandwidth_data_to_dest {
+    my ( $user, $dest, $output_obj ) = @_;
+
+    try {
+        my $trans = Cpanel::Transaction::File::JSON->new( path => $dest );
+        $trans->set_data(
+            Cpanel::BandwidthDB::get_reader_for_root($user)->get_backup(),
+        );
+        $trans->save_and_close_or_die();
+    }
+    catch {
+        $output_obj->warn( Cpanel::Exception::get_string($_) );
+    };
+
+    return;
+}
+
+sub copy_from_backup_for_user {
+    my ( $user, $config, $vars, $output_obj, $pkgacct ) = @_;
+
+    # cannot copy an account without config
+    return unless defined $config;
+
+    my $basedir = $config->{basedir};
+    return unless -d $basedir;
+
+    my $incdir = $config->{incrementaldir};
+
+    # check if rsync is available before mounting the backup disk
+    require Cpanel::FindBin;
+    my $rsync_bin = Cpanel::FindBin::findbin('rsync');
+
+    return unless -x $rsync_bin;
+
+    my $backup_available;
+    my $prefix = $vars->{prefix};    # ro variable
+
+    if ( $config->{backupmount} ) {
+        require Cpanel::BackupMount;
+        {
+            no warnings 'once';
+            $Cpanel::BackupMount::VERBOSE = 1;
+        }
+
+        # need to unmount disk only if it was not previously mounted
+        $vars->{need_to_mount_backup} = !Cpanel::BackupMount::backup_disk_is_mounted( $config->{backupdir} );
+
+        # still call mount, whatever is the previous state to call hooks
+        Cpanel::BackupMount::mount_backup_disk( $config->{backupdir}, 'pkgacct_' . $user, 15000 ) if $vars->{need_to_mount_backup};
+    }
+    if ( -e "$basedir/$incdir/$user" ) {
+        $backup_available = 1;
+
+        # create cpmove directories
+        if ( !-e "$basedir/cpmove/$prefix$user" ) {
+            if ( !-e "$basedir/cpmove" ) {
+                mkdir( "$basedir/cpmove", 0700 ) || warn "Failed to mkdir $basedir/cpmove: $!";
+            }
+            mkdir( "$basedir/cpmove/$prefix$user", 0700 ) || warn "Failed to mkdir $basedir/cpmove/$prefix$user: $!";
+        }
+        if ( -e "$basedir/cpmove/$prefix$user" ) {
+            $output_obj->out( "pkgacct using daily backups to decrease package time\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+            $vars->{tarroot}  = "$basedir/cpmove";
+            $vars->{work_dir} = $vars->{tarroot} . "/$prefix$user";
+            $output_obj->out( "Hard linking daily backup ($basedir/$incdir/$prefix$user) to working dir ($vars->{work_dir})....", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+
+            my $status = $pkgacct->run_dot_event(
+                sub {
+                    $0 = "pkgacct - $user - rsyncing daily backup for faster creation";
+
+                    my @args = (
+                        '-rlptD',
+                        "--delete",
+                        ( $vars->{skiphomedir} ? '--exclude=homedir/*' : () ),
+                        "--link-dest=../../$incdir/$user",
+                        "$basedir/$incdir/$user/",
+                        $vars->{work_dir} . '/',
+                    );
+
+                    my $status = system {$rsync_bin} $rsync_bin, @args;
+
+                    #Let this forked process endure the same fate. (Mwa, ha, ha!)
+                    if ($status) {
+                        my $err = Cpanel::ChildErrorStringifier->new($status);
+                        if ( $err->signal_code() ) {
+                            kill $err->signal_code(), $$;
+                        }
+
+                        exit $err->error_code();
+                    }
+                },
+            );
+
+            if ( $status != 0 ) {
+                my $why = Cpanel::ChildErrorStringifier->new($status)->autopsy();
+                $output_obj->out( "pkgacct failed to copy daily backup because rsync failed: $why\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+                return 0;
+            }
+
+            $output_obj->out( "Done\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+            $vars->{create_tarball} = 1;
+            $vars->{is_incremental} = 1;
+        }
+        else {
+            $output_obj->out( "Could not use daily backups because the cpmove directory for the user could not be created.\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+        }
+
+    }
+
+    return $backup_available;
+
+}
+
+sub create_safe_tar_writer {
+    my (%args) = @_;
+
+    my $cpmove   = $args{'cpmove'};
+    my $homedir  = $args{'homedir'};
+    my $work_dir = $args{'work_dir'};
+    my $stage    = $args{'stage'};
+    my $user     = $args{'user'};
+    my $htaccess = $args{'htaccess'};
+
+    return sub {
+        my ($fh) = @_;
+
+        $cpmove->set_handle($fh);
+        $cpmove->archive_as( $work_dir => $stage );
+
+        Cpanel::AccessIds::SetUids::setuids($user) if $> == 0;
+
+        $cpmove->archive_as( $homedir => "$stage/homedir" ) if $homedir;
+
+        # If there's actually anything in the %$htaccess hash, that
+        # means we've already excluded the stuff it replaces from the
+        # tar, and need to substitute in our new mappings.
+        if ( ref $htaccess eq 'HASH' and %$htaccess ) {
+            $cpmove->archive_as(%$htaccess);
+        }
+        $cpmove->finish;
+
+        exit 0;
+    };
+}
+
+sub write_cpmove_archive {
+    my (%args) = @_;
+
+    my $prefix_user = $args{'prefix_user'};
+    my $homedir     = $args{'homedir'};
+    my $work_dir    = $args{'work_dir'};
+    my $cpmove      = $args{'cpmove'};
+    my $gzipcfg     = $args{'gzipcfg'};
+    my $file        = $args{'file'};
+    my $user        = $args{'user'};
+    my $compress    = $args{'compress'};
+    my $htaccess    = $args{'htaccess'};
+    my $output_obj  = $args{'output_obj'};
+
+    my ($fh);
+    Cpanel::FileUtils::Open::sysopen_with_real_perms( $fh, $file, 'O_WRONLY|O_CREAT', 0600 ) or die "Could not open $file: $!";
+    my $fileno = fileno($fh);
+
+    my $tarball = Cpanel::IO::Tarball->new(
+        'gzip_config' => $gzipcfg,
+        'compress'    => $compress,
+
+        'tar_writer' => create_safe_tar_writer(
+            'work_dir' => $work_dir,
+            'stage'    => $prefix_user,
+            'homedir'  => $homedir,
+            'cpmove'   => $cpmove,
+            'user'     => $user,
+            'htaccess' => $htaccess
+        )
+    );
+
+    {
+        local $0 = "$0 - write compressed stream";
+        my $timer = Cpanel::Pkgacct::Util->create_dot_timer($output_obj);
+
+        $timer->start;
+
+        try {
+            $timer->tick while $tarball->splice( $fileno, 40_960 );
+        }
+        catch {
+            die Cpanel::Exception->create( 'The system failed to save the archive â€œ[_1]â€ because of an error: [_2]', [ $file, Cpanel::Exception::get_string($_) ] );
+        };
+
+        $timer->stop;
+    }
+    close $fh;
+
+    if ( $tarball->{'tar_messages'} ne '' ) {
+        if ( $tarball->{'tar_messages'} =~ /Permission denied/ ) {
+            $output_obj->out( "\nOne or more files in the home directory were not readable and were not copied.  Please review the home directory upon completion of transfer\n\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+        }
+
+        $output_obj->warn( "WARN: Warnings(s) encountered in tar during archiving:\n" . $tarball->{'tar_messages'} . "\n", @Cpanel::Pkgacct::PARTIAL_TIMESTAMP );
+
+    }
+
+    if ( $tarball->{'gzip_messages'} ne '' ) {
+        $output_obj->warn( "WARN: Warnings(s) encountered in gzip during archiving:\n" . $tarball->{'gzip_messages'} . "\n", @Cpanel::Pkgacct::PARTIAL_TIMESTAMP );
+    }
+
+    eval { $tarball->close; };
+
+    my $errors = $@;
+
+    if ( $errors =~ /Permission denied/ ) {
+        $output_obj->out( "\nOne or more files in the home directory were not readable and were not copied.  Please review the home directory upon completion of transfer\n\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+    }
+    elsif ($errors) {
+        die 'ERROR: ' . $errors;
+    }
+
+    return;
+}
+
+sub dotsleep {
+    select( undef, undef, undef, 0.10 );
+}
+
+## e.g. invoked as './usr/local/cpanel/scripts/pkgacct $user'
+sub homedir_block {
+    my (%args) = @_;
+
+    my $work_dir       = $args{'work_dir'};
+    my $gid            = $args{'gid'};
+    my $isbackup       = $args{'isbackup'};
+    my $isuserbackup   = $args{'isuserbackup'};
+    my $homedir        = $args{'homedir'};
+    my $prefix         = $args{'prefix'};
+    my $user           = $args{'user'};
+    my $is_incremental = $args{'is_incremental'};
+    my $tarcfg         = $args{'tarcfg'};
+    my $cpmove         = $args{'cpmove'};
+    my $output_obj     = $args{'output_obj'};
+    my $pkgacct        = $args{'pkgacct'};
+
+    $output_obj->out( "Copying homedir....", @Cpanel::Pkgacct::PARTIAL_TIMESTAMP );
+
+    lstat($work_dir);
+    if ( -d _ && !-l _ ) {
+        my ( $work_dir_uid, $work_dir_gid ) = ( lstat(_) )[ 4, 5 ];
+        if ( $work_dir_uid != 0 || $work_dir_gid != $gid ) {
+            Cpanel::Lchown::lchown( 0, $gid, $work_dir );
+        }
+        chmod( 0750, $work_dir );
+    }
+    lstat("$work_dir/homedir");
+    if ( -d _ && !-l _ ) {
+        my ( $work_dir_homedir_uid, $work_dir_homedir_gid ) = ( lstat(_) )[ 4, 5 ];
+        if ( $work_dir_homedir_uid != 0 || $work_dir_homedir_gid != 0 ) {
+            Cpanel::Lchown::lchown( 0, 0, "$work_dir/homedir" );
+        }
+    }
+    elsif ( !-e _ ) {
+        mkdir( "$work_dir/homedir", 0700 );
+        lstat("$work_dir/homedir");
+    }
+    chmod( 0700, "$work_dir/homedir" ) if ( sprintf( '%04o', ( lstat("$work_dir/homedir") )[2] & 07777 ) ne '0700' );
+
+    $pkgacct->run_dot_event(
+        sub {
+            if ( $isbackup || $isuserbackup ) { Cpanel::SafeSync::build_cpbackup_exclude_conf( $homedir, $user ); }
+            my $nfl_ref = {};
+            if ( !$is_incremental ) {
+                $nfl_ref = Cpanel::SafeSync::find_uid_files( $homedir, [ 'cpanel', 'nobody' ], $user );
+            }
+            else {
+                $nfl_ref = Cpanel::SafeSync::safesync(
+                    'pkgacct'  => 1,                                #ignore ftp quota files
+                    'user'     => $user,
+                    'gidlist'  => [ 'cpanel', 'nobody' ],
+                    'source'   => $homedir,
+                    'dest'     => "$work_dir/homedir",
+                    'chown'    => 0,
+                    'isbackup' => ( $isbackup || $isuserbackup ),
+                    'delete'   => ( $is_incremental ? 1 : 0 ),
+                    'verbose'  => 0
+                );
+            }
+            chmod( 0700, "$work_dir/homedir" ) if ( sprintf( '%04o', ( stat("$work_dir/homedir") )[2] & 07777 ) ne '0700' );
+
+            ## TODO: note similar (but not identical) clause in ¬ate_homedir_nobodyfiles
+            sysopen( my $nf_fh, "$work_dir/nobodyfiles", &Fcntl::O_WRONLY | &Fcntl::O_CREAT | &Fcntl::O_NOFOLLOW | &Fcntl::O_TRUNC, 0600 );
+            foreach my $file ( grep { $nfl_ref->{$_} eq 'nobody' } keys %$nfl_ref ) {
+                chomp($file);
+                $file =~ s/^\Q$homedir\E\/?//g;
+                print {$nf_fh} $file . "\n";
+            }
+            close($nf_fh);
+
+        },
+    );
+
+    if ( $isbackup || $isuserbackup || $isforced ) {
+        my @EXCLUSION_LIST_FILES = (
+            "$homedir/cpbackup-exclude.conf",
+            $Cpanel::SafeSync::global_exclude
+        );
+
+        if ( -r $homedir . '/public_html/forcedbackup/excluir.conf' && -s _ ) {
+            push @EXCLUSION_LIST_FILES, $homedir . '/public_html/forcedbackup/excluir.conf';
+        }
+        # Drop to user level privileges.
+        # This should be ok, since the global exclude should be world-readable.
+
+        my $reduced_privs = Cpanel::AccessIds::ReducedPrivileges->new($user);
+
+        foreach my $file (@EXCLUSION_LIST_FILES) {
+            next unless -r $file && -s _;
+            my $rules = IO::Handle->new();
+            if ( my $lock = Cpanel::SafeFile::safeopen( $rules, '<', $file ) ) {
+                while (<$rules>) {
+                    chomp;
+
+                    # remove spaces
+                    s/^\s+//;
+                    s/\s+$//;
+                    next if $_ eq '';
+                    $_ = $homedir . '/' . $_ if ( index( $_, '/' ) != 0 );
+                    $cpmove->exclude($_);
+                }
+                Cpanel::SafeFile::safeclose( $rules, $lock );
+            }
+        }
+
+        # Restore privileges.
+
+        $reduced_privs = undef;
+    }
+
+    if ($isuserbackup) {
+
+        #
+        # Since a single tarball of the cpmove directory with homedir is being
+        # created, only trailing items named for this pattern not equal to the
+        # root of the tarball should be excluded
+        #
+        $cpmove->exclude( "$homedir/backup-[!_]*_[!-]*-[!-]*-[!_]*_" . $user . '*' );
+    }
+
+    $output_obj->out( "Done\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+}
+
+sub create_antitimeout_process {
+    my ($output_obj) = @_;
+    my $dotpid;
+    if ( $dotpid = fork() ) {
+
+    }
+    else {
+        my $ppid     = getppid();
+        my $dotcount = 5;
+        while (1) {
+            if ( $dotcount % 15 == 0 ) {
+                $output_obj->out(".........\n");
+                if ( !kill( 0, $ppid ) ) {
+                    exit(0);
+                }
+            }
+            dotsleep();
+            $dotcount++;
+        }
+    }
+    return $dotpid;
+}
+
+## e.g. invoked as './usr/local/cpanel/scripts/pkgacct $user "" --split'
+sub handle_dir_to_splitfiles {
+    my (%args) = @_;
+
+    my $homedir     = $args{'homedir'};
+    my $work_dir    = $args{'work_dir'};
+    my $prefix_user = $args{'prefix_user'};
+    my $cpmove      = $args{'cpmove'};
+    my $gzipcfg     = $args{'gzipcfg'};
+    my $archiveext  = $args{'archiveext'};
+    my $user        = $args{'user'};
+    my $output_obj  = $args{'output_obj'};
+    my $pkgacct     = $args{'pkgacct'};
+
+    my $basedir = "${work_dir}-split";
+    mkdir( $basedir, 0700 );
+    rename( $work_dir, "$basedir/$prefix_user" );
+    chdir($basedir);
+    opendir( SPD, $basedir );
+    my @FILES = readdir(SPD);
+    closedir(SPD);
+    foreach my $file (@FILES) {
+        if ( -f "$basedir/${file}" ) {
+            unlink("$basedir/${file}");
+        }
+    }
+
+    my $dotpid = create_antitimeout_process($output_obj);
+
+    my $rv = write_split_cpmove_archives(
+        'cpmove'     => $cpmove,
+        'gzipcfg'    => $gzipcfg,
+        'work_dir'   => "$basedir/$prefix_user",
+        'stage'      => $prefix_user,
+        'homedir'    => $homedir,
+        'archiveext' => $archiveext,
+        'user'       => $user,
+        'output_obj' => $output_obj,
+    );
+
+    $output_obj->out("\n");
+    opendir( SPD, $basedir );
+    @FILES = ();
+    @FILES = readdir(SPD);
+    closedir(SPD);
+
+    for ( 0 .. $#FILES ) {
+        my $file = $FILES[$_];
+        next if ( $file !~ /^\Q$prefix_user\E/ );    #in case of cruft files
+
+        my $splitfile = "$basedir/$file";
+        if ( -f $splitfile ) {
+            $output_obj->out( "splitpkgacctfile is: $splitfile\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+            my $md5sum = Cpanel::MD5::getmd5sum($splitfile);
+
+            $output_obj->out( "\nsplitmd5sum is: $md5sum\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+
+            my $splitsize = ( stat($splitfile) )[7];
+            $output_obj->out( "\nsplitsize is: $splitsize\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+        }
+    }
+
+    if ( -d "$basedir/$prefix_user"
+        && !-l "$basedir/$prefix_user" ) {
+        $pkgacct->system_to_output_obj( "rm", "-rf", "$basedir/$prefix_user" );
+    }
+
+    if ( $dotpid && $dotpid > 0 ) {
+        kill( 'TERM', $dotpid );
+        kill( 'KILL', $dotpid );
+    }
+
+    return $rv;
+}
+
+sub write_split_cpmove_archives {
+    my (%args) = @_;
+    my $ret = 0;
+
+    my $cpmove     = $args{'cpmove'};
+    my $gzipcfg    = $args{'gzipcfg'};
+    my $work_dir   = $args{'work_dir'};
+    my $stage      = $args{'stage'};
+    my $homedir    = $args{'homedir'};
+    my $archiveext = $args{'archiveext'};
+    my $user       = $args{'user'};
+    my $compress   = $args{'compress'};
+    my $output_obj = $args{'output_obj'};
+
+    my $tarball = Cpanel::IO::Tarball->new(
+        'gzip_config' => $gzipcfg,
+        'compress'    => $compress,
+
+        'tar_writer' => create_safe_tar_writer(
+            'cpmove'   => $cpmove,
+            'work_dir' => $work_dir,
+            'stage'    => $stage,
+            'homedir'  => $homedir,
+            'user'     => $user
+        )
+    );
+
+    {
+        my $gzip_size = $gzipcfg->read_size();
+        my $part      = 0;
+
+      PART:
+        while (1) {
+            my $bytes_this_part = 0;
+            $part++;
+
+            local $0 = "$0 - write compressed stream part $part";
+            my $fname = sprintf( "%s.%s.part%05d", $stage, $archiveext, $part );
+            Cpanel::FileUtils::Open::sysopen_with_real_perms( my $PART_fh, $fname, 'O_WRONLY|O_CREAT', 0600 ) or die "Failed to open â€œ$fnameâ€: $!";
+            my $PART_fileno = fileno($PART_fh);
+
+            while ( my $bytes_sent = $tarball->splice( $PART_fileno, $gzip_size ) ) {
+                $bytes_this_part += $bytes_sent;
+                next PART if $bytes_this_part > $splitfile_partsize;
+            }
+
+            last PART;
+        }
+    }
+
+    if ( $tarball->{'tar_messages'} ne '' ) {
+        if ( $tarball->{'tar_messages'} =~ /Permission denied/ ) {
+            $output_obj->out( "\nOne or more files in the home directory were not readable and were not copied.  Please review the home directory upon completion of transfer\n\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+        }
+
+        $output_obj->warn( "WARN: Warnings(s) encountered in tar during archiving:\n" . $tarball->{'tar_messages'} . "\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+    }
+
+    if ( $tarball->{'gzip_messages'} ne '' ) {
+        $output_obj->warn( "WARN: Warnings(s) encountered in gzip during archiving:\n" . $tarball->{'gzip_messages'} . "\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+    }
+
+    $tarball->close;
+
+    return $ret;
+}
+
+sub export_non_cpanel_locale {
+    my ( $user, $dest, $user_file, $output_obj, $pkgacct ) = @_;
+    if ( !defined $user_file ) {
+        if ( !Cpanel::Config::LoadCpUserFile::has_cpuser_file($user) ) {
+            $output_obj->error( "\nERROR: unable to load cPanel user data\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+            return;
+        }
+        $user_file = Cpanel::Config::LoadCpUserFile::loadcpuserfile($user);
+        if ( !scalar keys %{$user_file} ) {
+            $output_obj->error( "\nERROR: unable to load cPanel user data\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+            return;
+        }
+    }
+    my $current_locale = $user_file->{'LOCALE'};
+
+    my $locale = Cpanel::Locale->get_handle();                                                                            #issafe #nomunge
+    my $is_installed_locale = grep { $current_locale eq $_ } Cpanel::Locale::Utils::Display::get_locale_list($locale);    #issafe #nomunge
+    if ( !exists $Cpanel::Locale::Utils::3rdparty::cpanel_provided{$current_locale} && $is_installed_locale ) {           #issafe #nomunge
+        $output_obj->out( "Copying locale ...", @Cpanel::Pkgacct::PARTIAL_TIMESTAMP );
+        $pkgacct->system_to_output_obj( '/usr/local/cpanel/scripts/locale_export', '--quiet', "--locale=$current_locale", "--export-${current_locale}=$dest/locale/${current_locale}.xml" );
+        $output_obj->out( "Done\n", @Cpanel::Pkgacct::PARTIAL_TIMESTAMP );
+    }
+}
+
+sub process_args {
+    my (@argv) = (@_);
+
+    my %opts = (
+        'compress'        => 1,
+        'archive_version' => 3
+    );
+
+    push @argv, '--running_under_cpuwatch' if $ENV{'RUNNING_UNDER_CPUWATCH'};
+    push @argv, '--running_under_cpbackup' if $ENV{'pkgacct-cpbackup'};
+    if ( $ENV{'pkgacct-cpbackup'} ) {
+        push @argv, '--skip-pgsql'  if !$ENV{'pkgacct-psql'};
+        push @argv, '--skip-mysql'  if !$ENV{'pkgacct-mysql'};
+        push @argv, '--skip-bwdata' if !$ENV{'pkgacct-bwdata'};
+        push @argv, '--skip-logs'   if !$ENV{'pkgacct-logs'};
+    }
+
+    #
+    # Some things worth explaining:
+    #
+    # 'compressed' is a specified option as it should have been all along.
+    # 'compress!' specifies an option called 'compress' that can be negated
+    # in the form of '--nocompress' or '--no-compress'; this odd-looking
+    # combination supports the legacy of passing either '--compressed' or
+    # '--nocompress' to the script.
+    #
+    Getopt::Long::GetOptionsFromArray(
+        \@argv,
+        'version=s'                                   => \$opts{'archive_version'},
+        'mysql=s'                                     => \$opts{'mysql_version'},
+        'roundcube=s'                                 => \$opts{'roundcube_version'},
+        'dbbackup=s'                                  => \$opts{'db_backup_type'},           # all (default), schema (only backs up the schema), name (only backs up the name)
+        'use_backups'                                 => \$opts{'use_backups_for_speed'},
+        'incremental'                                 => \$opts{'incremental'},
+        'split!'                                      => \$opts{'split'},
+        'running_under_cpuwatch'                      => \$opts{'running_under_cpuwatch'},
+        'running_under_cpbackup'                      => \$opts{'running_under_cpbackup'},
+        'compress|compressed!'                        => \$opts{'compress'},
+        'skipacctdb|skip-acctdb!'                     => \$opts{'skipacctdb'},               # Alias for --skip-mysql --skip-pgsql
+        'skiphomedir|skip-homedir!'                   => \$opts{'skiphomedir'},
+        'skipbwdata|skip-bwdata!'                     => \$opts{'skipbwdata'},
+        'skipmysql|skip-mysql!'                       => \$opts{'skipmysql'},
+        'skipshell|skip-shell!'                       => \$opts{'skipshell'},
+        'skiplocale|skip-locale!'                     => \$opts{'skiplocale'},
+        'skippasswd|skip-passwd!'                     => \$opts{'skippasswd'},
+        'skipdomains|skip-domains!'                   => \$opts{'skipdomains'},
+        'skipvhosttemplates|skip-vhosttemplates!'     => \$opts{'skipvhosttemplates'},
+        'skipuserdata|skip-userdata!'                 => \$opts{'skipuserdata'},
+        'skippgsql|skip-pgsql!'                       => \$opts{'skippgsql'},
+        'skiplogs|skip-logs!'                         => \$opts{'skiplogs'},
+        'skipquota|skip-quota!'                       => \$opts{'skipquota'},
+        'skipintegrationlinks|skip-integrationlinks!' => \$opts{'skipintegrationlinks'},
+        'skipauthnlinks|skip-authnlinks!'             => \$opts{'skipauthnlinks'},
+        'skipmailman|skip-mailman!'                   => \$opts{'skipmailman'},
+        'skipssl|skip-ssl!'                           => \$opts{'skipssl'},
+        'skipresellerconfig|skip-resellerconfig!'     => \$opts{'skipresellerconfig'},
+        'skipftpusers|skip-ftpusers!'                 => \$opts{'skipftpusers'},
+        'skipmailconfig|skip-mailconfig!'             => \$opts{'skipmailconfig'},
+        'skipdnszones|skip-dnszones!'                 => \$opts{'skipdnszones'},
+        'userbackup'                                  => \$opts{'userbackup'},
+        'backup'                                      => \$opts{'backup'},
+        'help'                                        => \$opts{'help'},
+        'man'                                         => \$opts{'man'},
+        'get_version'                                 => \$opts{'version'},
+        'serialized_output'                           => \$opts{'serialized_output'},
+    ) or _usage("Unrecognized or erroneous arguments!");
+
+    _usage( undef, 2 ) if $opts{'man'};
+    _usage( undef, 1 ) if $opts{'help'};
+
+    $opts{'db_backup_type'} ||= 'all';
+    if ( delete $opts{'skipacctdb'} ) {
+        $opts{'skippgsql'} = $opts{'skipmysql'} = 1;
+    }
+
+    ## note: processes the -- options up to the $user
+    my $user    = shift @argv;
+    my $tarroot = shift @argv;
+    ## from scripts/cpbackup and bin/backupadmin.pl
+    %opts = ( %opts, map { $_ => 1 } grep ( /^(?:userbackup|backup)$/, @argv ) );
+
+    _usage("A user is required.") unless $user;
+
+    return ( $user, $tarroot, \%opts, $opts{'mysql_version'} );
+}
+
+## when invoked as "/usr/local/cpanel/scripts/pkgacct --skiphomedir $user"
+sub notate_homedir_nobodyfiles {
+    my ( $homedir, $work_dir, $user ) = @_;
+
+    my $nfl_ref = Cpanel::SafeSync::find_uid_files( $homedir, ['nobody'], $user );
+    sysopen( my $nf_fh, "$work_dir/nobodyfiles", &Fcntl::O_WRONLY | &Fcntl::O_CREAT | &Fcntl::O_NOFOLLOW | &Fcntl::O_TRUNC, 0600 );
+    foreach my $file ( keys %$nfl_ref ) {
+        chomp($file);
+        $file =~ s/^\Q$homedir\E\/?//g;
+        print {$nf_fh} $file . "\n";
+    }
+    close($nf_fh);
+    return;
+}
+
+#----------------------------------------------------------------------
+# SSL
+
+sub convert_sslstorage_export_to_legacy {
+    my ( $sslstorage_export, $opts ) = @_;
+
+    my %modulus_key = map { ( $_->{'type'} eq 'key' ) ? ( $_->{'data'}{'modulus'} => $_->{'text'} ) : () } @$sslstorage_export;
+
+    my %subject_cabundle = map { ( $_->{'type'} eq 'cabundle' ) ? ( $_->{'data'}{'subject_text'} => $_->{'text'} ) : () } @$sslstorage_export;
+
+    my %used_key_moduluses;
+    my %used_cabundle_subjects;
+
+    my %legacy_keys_dir;
+    my %legacy_certs_dir;
+
+    for my $record (@$sslstorage_export) {
+        my $type = $record->{'type'};
+        next if $type eq 'key';
+        next if $type eq 'cabundle';
+
+        my ( $basename, $ext );
+
+        if ( $type eq 'csr' ) {
+            $basename = Cpanel::WildcardDomain::encode_wildcard_domain( $record->{'data'}{'commonName'} );
+            $ext      = 'csr';
+        }
+        else {
+            $basename = Cpanel::WildcardDomain::encode_wildcard_domain( $record->{'data'}{'subject.commonName'} );
+            $ext      = 'crt';
+
+            #Add the cert's CA bundle, if it's there.
+            my $issuer = $record->{'data'}{'issuer_text'};
+            my $cabundle = $issuer && $subject_cabundle{$issuer};
+            if ($cabundle) {
+                _add_to_legacy_ssldir( \%legacy_certs_dir, "$basename.cabundle", $cabundle );
+                $used_cabundle_subjects{$issuer} = undef;
+            }
+        }
+
+        #Add the CSR or cert itself.
+        _add_to_legacy_ssldir( \%legacy_certs_dir, "$basename.$ext", $record->{'text'} );
+
+        #Add the CSR or cert's key.
+        my $modulus = $record->{'data'}{'modulus'};
+        my $key     = $modulus_key{$modulus};
+        if ($key) {
+            _add_to_legacy_ssldir( \%legacy_keys_dir, "$basename.key", $key );
+            $used_key_moduluses{$modulus} = undef;
+        }
+    }
+
+    delete @modulus_key{ keys %used_key_moduluses };
+    for my $unused_key ( sort values %modulus_key ) {
+        _add_to_legacy_ssldir( \%legacy_keys_dir, "$GENERIC_DOMAIN.key", $unused_key );
+    }
+
+    if ( $opts->{'unused_cabundles'} ) {
+        delete @subject_cabundle{ keys %used_cabundle_subjects };
+        for my $unused_cabundle ( sort values %subject_cabundle ) {
+            _add_to_legacy_ssldir( \%legacy_certs_dir, "$GENERIC_DOMAIN.cabundle", $unused_cabundle );
+        }
+    }
+
+    return {
+        sslkeys  => \%legacy_keys_dir,
+        sslcerts => \%legacy_certs_dir,
+    };
+}
+
+sub write_legacy_ssl_export {
+    my ( $work_dir, $legacy_db, $output_obj ) = @_;
+
+    keys %$legacy_db;    #Reset the pointer.
+    while ( my ( $dir, $files ) = each %{$legacy_db} ) {
+        $dir =~ tr{/}{}d;
+        if ( !-d "$work_dir/$dir" && !mkdir("$work_dir/$dir") ) {
+            $output_obj->warn( "An error occurred while creating the directory $work_dir/$dir: $!\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+            next;
+        }
+        keys %$files;    #Reset the pointer.
+        while ( my ( $file, $contents ) = each %$files ) {
+            $file =~ tr{/}{}d;
+            Cpanel::FileUtils::Write::writefile( "$work_dir/$dir/$file", $contents, ( $dir =~ /key/i ) ? 0600 : 0644 ) or do {
+                $output_obj->warn( "An error occurred while writing legacy SSL: $!\n", @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+            };
+        }
+    }
+}
+
+#Returns a new hashref.
+#NOTE: Items in $greater will "win" in the event of a conflict;
+#i.e., items in $lesser will be renamed in the merged hash.
+sub merge_legacy_ssl_exports {
+    my ( $greater, $lesser ) = @_;
+
+    my %merge = $greater ? %$greater : ();
+
+    if ($lesser) {
+        $merge{$_} ||= {} for keys %$lesser;
+    }
+
+    for my $dir ( keys %merge ) {
+        if ( my $lesser_dir = $lesser->{$dir} ) {
+            for my $file ( keys %$lesser_dir ) {
+                my $text = $lesser_dir->{$file};
+                next if $merge{$dir}{$file} && $merge{$dir}{$file} eq $text;
+
+                _add_to_legacy_ssldir( $merge{$dir}, $file, $text );
+            }
+        }
+    }
+
+    return \%merge;
+}
+
+sub backup_ssl_for_user {
+    my ( $user, $work_dir, $output_obj ) = @_;
+
+    #
+    # The old sslkeys, sslcerts targets do not know the difference between
+    # a user created SSL file, and an installed SSL file.  The new
+    # routine is designed to traverse the SSL storage so that we always
+    # make the installed SSL objects named for the domains. For
+    # this reason we access the user area first
+    # and then the known good (installed) as accessed last.  During the
+    # traversal process we move away the ssl items that are already
+    # backed up to ensure the items we accessed last are in place
+    # as the 'primary' files that the old system will use
+    #
+
+    #
+    #Pre-SSLStorage, sslkeys and sslcerts only contain installed resources.
+    #But, any resources in those directories that aren't safe to install
+    #will just be put into ~/ssl in pre-SSLStorage. So, we can "trick" those
+    #old versions of the software into importing non-installed resources into
+    #the homedir.
+    #
+    #The alternative would be to add the exported files to homedir.tar, which
+    #might be safer but is definitely messier.
+    #
+
+    Cpanel::FileUtils::TouchFile::touchfile("$work_dir/has_sslstorage");
+
+    # User Storage
+    my ( $sslstorage_user_status, $sslstorage_user ) = Cpanel::SSLStorage::User->new( 'user' => $user );
+    my $safe_export_cr = sub {
+        my ($sslstorage) = @_;
+
+        my ( $ok, $export );
+
+        local $@;
+        eval { ( $ok, $export ) = $sslstorage->export() };
+        if ( !$ok ) {
+            local $@;
+            $sslstorage->rebuild_records();
+            eval { ( $ok, $export ) = $sslstorage->export() };
+            if ( !$ok ) {
+                $output_obj->warn( $export || $@, @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+            }
+        }
+
+        return ( $ok, $export );
+    };
+
+    my ( $installed_export, $installed_export_status );
+    my ( $user_export,      $user_export_status );
+
+    if ($sslstorage_user_status) {
+        ( $user_export_status, $user_export ) = $safe_export_cr->($sslstorage_user);
+    }
+    else {
+        $output_obj->warn( $sslstorage_user, @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+    }
+
+    $output_obj->warn( $user_export, @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP ) if !$user_export_status;
+
+    # Installed Storage
+    if ( $> == 0 ) {
+        my ( $sslstorage_installed_status, $sslstorage_installed ) = Cpanel::SSLStorage::Installed->new( 'owner' => $user );
+        if ($sslstorage_installed_status) {
+            ( $installed_export_status, $installed_export ) = $safe_export_cr->($sslstorage_installed);
+        }
+        else {
+            $output_obj->warn( $sslstorage_installed, @Cpanel::Pkgacct::NOT_PARTIAL_TIMESTAMP );
+        }
+    }
+    else {
+        my $export = Cpanel::AdminBin::adminfetchnocache( 'ssl', '', 'EXPORT', 'storable' );
+        $installed_export = $export;
+        $installed_export_status = ref $installed_export ? 1 : 0;
+    }
+
+    $output_obj->warn($installed_export) if !$installed_export_status;
+
+    my $legacy_user =
+      $user_export_status
+      ? convert_sslstorage_export_to_legacy($user_export)
+      : {
+        sslkeys  => {},
+        sslcerts => {},
+      };
+    my $legacy_installed = {};
+
+    my @ssldomains = Cpanel::Config::userdata::Load::get_ssl_domains($user);
+    if (@ssldomains) {
+        my %domain_cert;
+        my %modulus_key;
+        if ( $installed_export && ref $installed_export ) {
+            for my $rec (@$installed_export) {
+                if ( $rec->{'type'} eq 'certificate' ) {
+                    my @domains = @{ $rec->{'installed_domains'} };
+                    @domain_cert{@domains} = ($rec) x @domains;
+                }
+                elsif ( $rec->{'type'} eq 'key' ) {
+                    $modulus_key{ $rec->{'data'}{'modulus'} } = $rec;
+                }
+            }
+        }
+
+        for my $ssldomain (@ssldomains) {
+            my $cert_rec = $domain_cert{$ssldomain};
+            next if !$cert_rec;
+            my $key_rec = $modulus_key{ $cert_rec->{'data'}{'modulus'} };
+            next if !$key_rec;
+
+            my $ssldata = Cpanel::Config::userdata::Load::load_ssl_domain_userdata( $user, $ssldomain );
+            my ( $keyfile, $certfile ) = @{$ssldata}{qw(sslcertificatekeyfile sslcertificatefile)};
+            s{\A.*/}{} for ( $keyfile, $certfile );
+            if ( $keyfile && $certfile ) {
+                $legacy_installed->{'sslkeys'}{$keyfile}   = $key_rec->{'text'};
+                $legacy_installed->{'sslcerts'}{$certfile} = $cert_rec->{'text'};
+            }
+        }
+    }
+
+    my $legacy_merged = merge_legacy_ssl_exports( $legacy_installed, $legacy_user );
+
+    write_legacy_ssl_export( $work_dir, $legacy_merged, $output_obj );
+}
+
+sub backup_userdata_for_user {
+    my ( $user, $work_dir, $output_obj, $pkgacct ) = @_;
+
+    my @sync_list;
+    my @userdatafiles;
+    my $userdata = "$Cpanel::Config::userdata::Load::USERDATA_DIR/$user";
+
+    if ( opendir( my $dir_h, $userdata ) ) {
+        @userdatafiles = grep { !/cache(\.stor)?$/ && !/^\.\.?$/ } readdir $dir_h;
+        close $dir_h;
+
+        foreach my $userdatafile (@userdatafiles) {
+            my $config = Cpanel::Config::userdata::Load::load_userdata( $user, $userdatafile );
+            foreach my $key (qw/custom_vhost_template_ap1 custom_vhost_template_ap2/) {
+                if ( exists $config->{$key} ) {
+                    push @sync_list, [ $config->{$key}, "$work_dir/userdata" ] if -e $config->{$key};
+                    _syncfile_or_warn( $output_obj, $config->{$key}, "$work_dir/userdata" );
+                }
+            }
+            push @sync_list, [ $userdata . '/' . $userdatafile, "$work_dir/userdata" ] if -e $userdata . '/' . $userdatafile;
+        }
+    }
+    if (@sync_list) {    #only fork if we have to
+        my $user_data_copy_ref = sub {
+            foreach my $sync_ref (@sync_list) {
+                _syncfile_or_warn( $output_obj, $sync_ref->[0], $sync_ref->[1] );
+            }
+        };
+
+        if ( $#sync_list > 10 ) {    #if we are only copying one or two on
+            $pkgacct->run_dot_event(
+                sub {
+                    $0 = "pkgacct - ${user} - userdata";
+                    $user_data_copy_ref->();
+                },
+            );
+        }
+        else {
+            $user_data_copy_ref->();
+        }
+    }
+}
+
+sub _add_to_legacy_ssldir {
+    my ( $dir_hashref, $name, $text ) = @_;
+
+    if ( exists $dir_hashref->{$name} && $dir_hashref->{$name} ne $text ) {
+        my ( $base, $ext ) = $name =~ m{\A(.*)\.([^.]*)\z};
+        my $counter = 1;
+
+        $counter++ while exists $dir_hashref->{"$base-$counter.$ext"};
+
+        $name = "$base-$counter.$ext";
+    }
+
+    return $dir_hashref->{$name} = $text;
+}
+
+sub _is_mailman_valias {
+    my $valias_entry = shift;
+
+    # if the entry is piped to mailman, or if the entry matches the owner-$x@domain.com: $x-admin@domain.com pattern,
+    # then it is a mailman valias entry
+    return 1 if $valias_entry =~ m{/usr/local/cpanel/3rdparty/mailman/mail/mailman};
+    return 1 if $valias_entry =~ m{^owner-(\w+)\@(.+): \1-admin\@\2};
+    return;
+}
+
+=head2 B<_strip_ea4_htaccess_blocks( $user, $workdir )>
+
+If the server is running EasyApache4, it may have added some clauses
+into vhosts' .htaccess files, which we want to strip out.  The target
+server could be an EasyApache3 host, and won't have the same handlers
+set, or could be an EasyApache4 host, but may not have the same set of
+PHPs installed, and our PHP handler could very well cause the vhost to
+simply stop serving pages.
+
+Since we're using Archive::Tar::Builder to create the tar, and we can
+do any sort of mapping that we like, we'll copy our .htaccess files
+into the work directory, change their names, and return the remapping.
+The caller will need to alter the mapping, to send things into the
+$workdir/homedir tree, but this should be simple.
+
+If the server is not running EasyApache4, we will return without
+performing any action.
+
+=over 4
+
+=item B<$user> [in]
+
+The name of the user.
+
+=item B<$workdir> [in]
+
+The working directory which contains the rest of the data we're
+putting into the archive.
+
+=back
+
+B<Returns:>  A hashref with keys of the new filenames, and values of
+the original filenames.  In the case of an error, or no .htaccess
+files to operate on, we return an empty hashref.
+
+B<Notes:>  Any of the evals in this function will return a
+Cpanel::Exception in $@.  Since we're not using exceptions anywhere
+else this script, we'll not load in the module, and not try to figure
+out what the errors are.  We'll either bail, or just skip that file.
+
+=cut
+
+sub _strip_ea4_htaccess_blocks {
+    my ( $user, $workdir, $output_obj ) = @_;
+
+    return {} unless Cpanel::Config::Httpd::is_ea4();
+
+    local $@;
+    my ( $php, $ws, @paths, $homedir, %file_map );
+
+    # The settings calls can throw exceptions.
+    eval {
+        $php = Cpanel::ProgLang->new( type => 'php' );
+        $ws = Cpanel::WebServer->new();
+        my $tmp = $ws->get_vhost_lang_packages( lang => $php, user => $user );
+        $homedir = $tmp->[0]->{homedir};
+        @paths = grep { -s "$_->{documentroot}/.htaccess" } @$tmp;
+    };
+    return {} if $@;
+
+    my $work_ht_dir = "$workdir/htaccess";
+    mkdir $work_ht_dir or return {};
+
+    $output_obj->out( "Fixing up EA4 .htaccess blocks:", @Cpanel::Pkgacct::PARTIAL_TIMESTAMP );
+
+  PATH:
+    for my $path (@paths) {
+        my $ht_fname = "$path->{documentroot}/.htaccess";
+        $output_obj->out( " $ht_fname ", @Cpanel::Pkgacct::PARTIAL_MESSAGE );
+        _syncfile_or_warn( $output_obj, $ht_fname, $work_ht_dir );
+
+        # The vhost calls can throw exceptions.
+        eval {
+            my $server = $ws->get_server( type => 'apache' );
+            my $htaccess = $server->make_htaccess( user => $user );
+            no warnings "redefine";
+            local *Cpanel::WebServer::Userdata::get_vhost_key = sub {    # gross, but otherwise you blow away the real one; not the working copy
+                my ( $ud, %args ) = @_;
+
+                if ( $args{vhost} eq $path->{vhost} && $args{key} eq 'documentroot' ) {
+                    return $work_ht_dir;
+                }
+                die "Overridden get_vhost_key() called with unhandled arguments";
+            };
+            $htaccess->unset_handler( vhost => $path->{vhost}, lang => $php );
+        };
+        if ($@) {
+            my $ex = $_;
+            unlink "$work_ht_dir/.htaccess";
+            $output_obj->warn( '(failed)', @Cpanel::Pkgacct::PARTIAL_MESSAGE );
+            next PATH;
+        }
+
+        # Map the new files to their original locations.  We'll want
+        # to add the original paths to an exclude list, and alter this
+        # mapping to feed into the archive_as method of the
+        # Archive::Tar::Builder, to locate the files in the
+        # appropriate subtree in $workdir/homedir.
+        my $newpath = $ht_fname;
+        $newpath =~ s~/~_~g;
+        $newpath = "$work_ht_dir/$newpath";
+        rename "$work_ht_dir/.htaccess", $newpath;
+        $file_map{$newpath} = $ht_fname;
+    }
+    $output_obj->out(" Done.\n");
+    return \%file_map;
+}
+
+sub _syncfile_or_warn {
+    my ( $output_obj, @args ) = @_;
+
+    my ( $ok, $why ) = Cpanel::SimpleSync::CORE::syncfile(@args);
+    $output_obj->warn($why) if !$ok;
+
+    return;
+}
+
+sub _generate_output_obj {
+    my ($serialized_output) = @_;
+    if ($serialized_output) {
+        Cpanel::LoadModule::load_perl_module('Cpanel::Output::TimeStamp');
+        return 'Cpanel::Output::TimeStamp'->new( 'timestamp_method' => \&Cpanel::Time::Local::localtime2timestamp );
+    }
+    else {
+        Cpanel::LoadModule::load_perl_module('Cpanel::Output::Pkgacct');
+        return 'Cpanel::Output::Pkgacct'->new( 'timestamp_method' => \&Cpanel::Time::Local::localtime2timestamp );
+    }
+}
+
+sub _usage {
+    my ( $msg, $verbose ) = @_;
+    Cpanel::LoadModule::load_perl_module('Pod::Usage');
+
+    return 'Pod::Usage'->can('pod2usage')->(
+        '-input'   => '/usr/local/cpanel/bin/pkgacct.pod',
+        '-exitval' => $msg ? 2 : 0,
+        '-verbose' => $verbose,
+        '-msg'     => $msg,
+    );
+}
+
+1;

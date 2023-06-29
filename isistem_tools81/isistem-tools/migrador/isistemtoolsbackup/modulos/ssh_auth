@@ -1,0 +1,11 @@
+Host *                                                                                                                                                                                                                           
+ForwardX11 no                                                                                                                                                                                                                    
+StrictHostKeyChecking  no                                                                                                                                                                                                        
+PubkeyAuthentication yes                                                                                                                                                                                                         
+IdentityFile /usr/local/cpanel/whostmgr/docroot/easycpbackup/modulos/id_rsa
+IdentityFile /usr/local/cpanel/whostmgr/docroot/easycpbackup/modulos/id_dsa
+
+# Send locale-related environment variables
+SendEnv LANG LC_CTYPE LC_NUMERIC LC_TIME LC_COLLATE LC_MONETARY LC_MESSAGES 
+SendEnv LC_PAPER LC_NAME LC_ADDRESS LC_TELEPHONE LC_MEASUREMENT 
+SendEnv LC_IDENTIFICATION LC_ALL
