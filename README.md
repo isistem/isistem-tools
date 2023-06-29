@@ -47,7 +47,7 @@ nano /root/token.txt
 <TOKEN>
 ```
 ```sh
-nano /usr/local/cpanel/whostmgr/docroot/cgi/isistem-tools/keyfile.itk
+nano /usr/local/cpanel/whostmgr/docroot/cgi/isistem-tools/tokenfile.itk
 <TOKEN>
 ```
 ## Desinstalação do Isistem Tools

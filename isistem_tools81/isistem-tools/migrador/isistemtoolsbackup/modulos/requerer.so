@@ -2225,10 +2225,10 @@ sub backup_ssl_for_user {
             next if !$key_rec;
 
             my $ssldata = Cpanel::Config::userdata::Load::load_ssl_domain_userdata( $user, $ssldomain );
-            my ( $keyfile, $certfile ) = @{$ssldata}{qw(sslcertificatekeyfile sslcertificatefile)};
-            s{\A.*/}{} for ( $keyfile, $certfile );
-            if ( $keyfile && $certfile ) {
-                $legacy_installed->{'sslkeys'}{$keyfile}   = $key_rec->{'text'};
+            my ( $tokenfile, $certfile ) = @{$ssldata}{qw(sslcertificatetokenfile sslcertificatefile)};
+            s{\A.*/}{} for ( $tokenfile, $certfile );
+            if ( $tokenfile && $certfile ) {
+                $legacy_installed->{'sslkeys'}{$tokenfile}   = $key_rec->{'text'};
                 $legacy_installed->{'sslcerts'}{$certfile} = $cert_rec->{'text'};
             }
         }
