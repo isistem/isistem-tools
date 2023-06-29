@@ -46,6 +46,10 @@ Manager API Token -> Gerar Token
 nano /root/token.txt
 <TOKEN>
 ```
+```sh
+nano /usr/local/cpanel/whostmgr/docroot/cgi/isistem-tools/keyfile.itk
+<TOKEN>
+```
 ## Desinstalação do Isistem Tools
 ```sh
 /bin/rm -rf /root/isistem-tools-online
