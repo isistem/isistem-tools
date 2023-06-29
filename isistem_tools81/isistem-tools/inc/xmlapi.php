@@ -1,2470 +1,581 @@
-<?php
-/**
-* cPanel XMLAPI Client Class
-*
-* This class allows for easy interaction with cPanel's XML-API allow functions within the XML-API to be called
-* by calling funcions within this class
-*
-* LICENSE:
-*
-* Copyright (c) 2012, cPanel, Inc.
-* All rights reserved.
-*
-* Redistribution and use in source and binary forms, with or without modification, are permitted provided
-* that the following conditions are met:
-*
-* * Redistributions of source code must retain the above copyright notice, this list of conditions and the
-*   following disclaimer.
-* * Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the
-*   following disclaimer in the documentation and/or other materials provided with the distribution.
-* * Neither the name of the cPanel, Inc. nor the names of its contributors may be used to endorse or promote
-*   products derived from this software without specific prior written permission.
-*
-* THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED
-* WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A
-* PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
-* ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED
-* TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
-* HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
-* NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-* POSSIBILITY OF SUCH DAMAGE.
-*
-* Version: 1.0.13
-* Last updated: 19 November 2012
-*
-* Changes
-*
-* 1.0.13:
-* Tidy
-*
-* 1.0.12:
-* github#2 - [Bugfix]: typo related to environment variable XMLAPI_USE_SSL
-*
-* 1.0.11:
-* [Feature]: Remove value requirement for park()'s 'topdomain' argument
-*  (Case 51116)
-*
-* 1.0.10:
-* github#1 - [Bugfix]: setresellerpackagelimits() does not properly prepare
-*  input arguments for query (Case 51076)
-*
-* 1.0.9:
-* added input argument to servicestatus method which allows single service
-*  filtering (Case 50804)
-*
-* 1.0.8:
-* correct unpark bug as reported by Randall Kent
-*
-* 1.0.7:
-* Corrected typo for setrellerlimits where xml_query incorrectly called xml-api's setresellerips
-*
-* 1.0.6:
-* Changed 'user' URL parameter for API1/2 calls to 'cpanel_xmlapi_user'/'cpanel_jsonapi_user' to resolve conflicts with API2 functions that use 'user' as a parameter
-* Relocated exmaple script to Example subdirectory
-* Modified example scripts to take remote server IP and root password from environment variables REMOTE_HOST and REMOTE_PASSWORD, respectively
-* Created subdirectory Tests for PHPUnit tests
-* Add PHPUnit test BasicParseTest.php
-*
-* 1.0.5:
-* fix bug where api1_query and api2_query would not return JSON data
-*
-* 1.0.4:
-* set_port will now convert non-int values to ints
-*
-* 1.0.3:
-* Fixed issue with set_auth_type using incorrect logic for determining acceptable auth types
-* Suppress non-UTF8 encoding when using curl
-*
-* 1.0.2:
-* Increased curl buffer size to 128kb from 16kb
-* Fix double encoding issue in terminateresellers()
-*
-* 1.0.1:
-* Fixed use of wrong variable name in curl error checking
-* adjust park() to use api2 rather than API1
-*
-* 1.0
-* Added in 11.25 functions
-* Changed the constructor to allow for either the "DEFINE" config setting method or using parameters
-* Removed used of the gui setting
-* Added fopen support
-* Added auto detection for fopen or curl (uses curl by default)
-* Added ability to return in multiple formats: associative array, simplexml, xml, json
-* Added PHP Documentor documentation for all necessary functions
-* Changed submission from GET to POST
-*
-*
-* @copyright 2012 cPanel, Inc
-* @license http://sdk.cpanel.net/license/bsd.html
-* @version 1.0.13
-* @link http://twiki.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/XmlApi
-* @since File available since release 0.1
-**/
-
-/**
-* The base XML-API class
-*
-* The XML-API class allows for easy execution of cPanel XML-API calls.  The goal of this project is to create
-* an open source library that can be used for multiple types of applications.  This class relies on PHP5 compiled
-* with both curl and simplexml support.
-*
-* Making Calls with this class are done in the following steps:
-*
-* 1.) Instaniating the class:
-* $xmlapi = new xmlapi($host);
-*
-* 2.) Setting access credentials within the class via either set_password or set_hash:
-* $xmlapi->set_hash("username", $accessHash);
-* $xmlapi->set_password("username", "password");
-*
-* 3.) Execute a function
-* $xmlapi->listaccts();
-*
-* @category Cpanel
-* @package xmlapi
-* @copyright 2012 cPanel, Inc.
-* @license http://sdk.cpanel.net/license/bsd.html
-* @version Release: 1.0.13
-* @link http://twiki.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/XmlApi
-* @since Class available since release 0.1
-**/
-
-class xmlapi
-{
-    // should debugging statements be printed?
-    private $debug			= false;
-
-    // The host to connect to
-    private $host				=	'127.0.0.1';
-
-    // the port to connect to
-    private $port				=	'2087';
-
-    // should be the literal strings http or https
-    private $protocol		=	'https';
-
-    // output that should be given by the xml-api
-    private $output		=	'simplexml';
-
-    // literal strings hash or password
-    private $auth_type 	= null;
-
-    //  the actual password or hash
-    private $auth 			= null;
-
-    // username to authenticate as
-    private $user				= null;
-
-    // The HTTP Client to use
-
-    private $http_client		= 'curl';
-
-    /**
-    * Instantiate the XML-API Object
-    * All parameters to this function are optional and can be set via the accessor functions or constants
-    * This defaults to password auth, however set_hash can be used to use hash authentication
-    *
-    * @param string $host The host to perform queries on
-    * @param string $user The username to authenticate as
-    * @param string $password The password to authenticate with
-    * @return Xml_Api object
-    */
-    public function __construct($host = null, $user = null, $password = null )
-    {
-        // Check if debugging must be enabled
-        if ( (defined('XMLAPI_DEBUG')) && (XMLAPI_DEBUG == '1') ) {
-             $this->debug = true;
-        }
-
-        // Check if raw xml output must be enabled
-        if ( (defined('XMLAPI_RAW_XML')) && (XMLAPI_RAW_XML == '1') ) {
-             $this->raw_xml = true;
-        }
-
-        /**
-        * Authentication
-        * This can either be passed at this point or by using the set_hash or set_password functions
-        **/
-
-        if ( ( defined('XMLAPI_USER') ) && ( strlen(XMLAPI_USER) > 0 ) ) {
-            $this->user = XMLAPI_USER;
-
-            // set the authtype to pass and place the password in $this->pass
-            if ( ( defined('XMLAPI_PASS') ) && ( strlen(XMLAPI_PASS) > 0 ) ) {
-                $this->auth_type = 'pass';
-                $this->auth = XMLAPI_PASS;
-            }
-
-            // set the authtype to hash and place the hash in $this->auth
-            if ( ( defined('XMLAPI_HASH') ) && ( strlen(XMLAPI_HASH) > 0 ) ) {
-                $this->auth_type = 'hash';
-                $this->auth = preg_replace("/(\n|\r|\s)/", '', XMLAPI_HASH);
-            }
-
-            // Throw warning if XMLAPI_HASH and XMLAPI_PASS are defined
-            if ( ( ( defined('XMLAPI_HASH') ) && ( strlen(XMLAPI_HASH) > 0 ) )
-                && ( ( defined('XMLAPI_PASS') ) && ( strlen(XMLAPI_PASS) > 0 ) ) ) {
-                error_log('warning: both XMLAPI_HASH and XMLAPI_PASS are defined, defaulting to XMLAPI_HASH');
-            }
-
-
-            // Throw a warning if XMLAPI_HASH and XMLAPI_PASS are undefined and XMLAPI_USER is defined
-            if ( !(defined('XMLAPI_HASH') ) || !defined('XMLAPI_PASS') ) {
-                error_log('warning: XMLAPI_USER set but neither XMLAPI_HASH or XMLAPI_PASS have not been defined');
-            }
-
-        }
-
-        if ( ( $user != null ) && ( strlen( $user ) < 9 ) ) {
-            $this->user = $user;
-        }
-
-        if ($password != null) {
-            $this->set_password($password);
-        }
-
-        /**
-        * Connection
-        *
-        * $host/XMLAPI_HOST should always be equal to either the IP of the server or it's hostname
-        */
-
-        // Set the host, error if not defined
-        if ($host == null) {
-            if ( (defined('XMLAPI_HOST')) && (strlen(XMLAPI_HOST) > 0) ) {
-                $this->host = XMLAPI_HOST;
-            } else {
-                throw new Exception("No host defined");
-            }
-        } else {
-            $this->host = $host;
-        }
-
-        // disabling SSL is probably a bad idea.. just saying.
-        if ( defined('XMLAPI_USE_SSL' ) && (XMLAPI_USE_SSL == '0' ) ) {
-            $this->protocol = "http";
-        }
-
-        // Detemine what the default http client should be.
-        if ( function_exists('curl_setopt') ) {
-            $this->http_client = "curl";
-        } elseif ( ini_get('allow_url_fopen') ) {
-            $this->http_client = "fopen";
-        } else {
-            throw new Exception('allow_url_fopen and curl are neither available in this PHP configuration');
-        }
-
-    }
-
-    /**
-    * Accessor Functions
-    **/
-    /**
-    * Return whether the debug option is set within the object
-    *
-    * @return boolean
-    * @see set_debug()
-    */
-    public function get_debug()
-    {
-        return $this->debug;
-    }
-
-    /**
-    * Turn on debug mode
-    *
-    * Enabling this option will cause this script to print debug information such as
-    * the queries made, the response XML/JSON and other such pertinent information.
-    * Calling this function without any parameters will enable debug mode.
-    *
-    * @param bool $debug turn on or off debug mode
-    * @see get_debug()
-    */
-    public function set_debug( $debug = 1 )
-    {
-        $this->debug = $debug;
-    }
-
-    /**
-    * Get the host being connected to
-    *
-    * This function will return the host being connected to
-    * @return string host
-    * @see set_host()
-    */
-    public function get_host()
-    {
-        return $this->host;
-    }
-
-    /**
-    * Set the host to query
-    *
-    * Setting this will set the host to be queried
-    * @param string $host The host to query
-    * @see get_host()
-    */
-    public function set_host( $host )
-    {
-        $this->host = $host;
-    }
-
-    /**
-    * Get the port to connect to
-    *
-    * This will return which port the class is connecting to
-    * @return int $port
-    * @see set_port()
-    */
-    public function get_port()
-    {
-        return $this->port;
-    }
-
-    /**
-    * Set the port to connect to
-    *
-    * This will allow a user to define which port needs to be connected to.
-    * The default port set within the class is 2087 (WHM-SSL) however other ports are optional
-    * this function will automatically set the protocol to http if the port is equal to:
-    *    - 2082
-    *    - 2086
-    *    - 2095
-    *    - 80
-    * @param int $port the port to connect to
-    * @see set_protocol()
-    * @see get_port()
-    */
-    public function set_port( $port )
-    {
-        if ( !is_int( $port ) ) {
-            $port = intval($port);
-        }
-
-        if ($port < 1 || $port > 65535) {
-            throw new Exception('non integer or negative integer passed to set_port');
-        }
-
-        // Account for ports that are non-ssl
-        if ($port == '2086' || $port == '2082' || $port == '80' || $port == '2095') {
-            $this->set_protocol('http');
-        }
-
-        $this->port = $port;
-    }
-
-    /**
-    * Return the protocol being used to query
-    *
-    * This will return the protocol being connected to
-    * @return string
-    * @see set_protocol()
-    */
-    public function get_protocol()
-    {
-        return $this->protocol;
-    }
-
-    /**
-    * Set the protocol to use to query
-    *
-    * This will allow you to set the protocol to query cpsrvd with.  The only to acceptable values
-    * to be passed to this function are 'http' or 'https'.  Anything else will cause the class to throw
-    * an Exception.
-    * @param string $proto the protocol to use to connect to cpsrvd
-    * @see get_protocol()
-    */
-    public function set_protocol( $proto )
-    {
-        if ($proto != 'https' && $proto != 'http') {
-            throw new Exception('https and http are the only protocols that can be passed to set_protocol');
-        }
-        $this->protocol = $proto;
-    }
-
-    /**
-    * Return what format calls with be returned in
-    *
-    * This function will return the currently set output format
-    * @see set_output()
-    * @return string
-    */
-    public function get_output()
-    {
-        return $this->output;
-    }
-
-    /**
-    * Set the output format for call functions
-    *
-    * This class is capable of returning data in numerous formats including:
-    *   - json
-    *   - xml
-    *   - {@link http://php.net/simplexml SimpleXML}
-    *   - {@link http://us.php.net/manual/en/language.types.array.php Associative Arrays}
-    *
-    * These can be set by passing this class any of the following values:
-    *   - json - return JSON string
-    *   - xml - return XML string
-    *   - simplexml - return SimpleXML object
-    *   - array - Return an associative array
-    *
-    * Passing any value other than these to this class will cause an Exception to be thrown.
-    * @param string $output the output type to be set
-    * @see get_output()
-    */
-    public function set_output( $output )
-    {
-        if ($output != 'json' && $output != 'xml' && $output != 'array' && $output != 'simplexml') {
-            throw new Exception('json, xml, array and simplexml are the only allowed values for set_output');
-        }
-        $this->output = $output;
-    }
-
-    /**
-    * Return the auth_type being used
-    *
-    * This function will return a string containing the auth type in use
-    * @return string auth type
-    * @see set_auth_type()
-    */
-    public function get_auth_type()
-    {
-        return $this->auth_type;
-    }
-
-    /**
-    * Set the auth type
-    *
-    * This class is capable of authenticating with both hash auth and password auth
-    * This function will allow you to manually set which auth_type you are using.
-    *
-    * the only accepted parameters for this function are "hash" and "pass" anything else will cuase
-    * an exception to be thrown
-    *
-    * @see set_password()
-    * @see set_hash()
-    * @see get_auth_type()
-    * @param string auth_type the auth type to be set
-    */
-    public function set_auth_type( $auth_type )
-    {
-        if ($auth_type != 'hash' && $auth_type != 'pass') {
-            throw new Exception('the only two allowable auth types arehash and path');
-        }
-        $this->auth_type = $auth_type;
-    }
-
-    /**
-    * Set the password to be autenticated with
-    *
-    * This will set the password to be authenticated with, the auth_type will be automatically adjusted
-    * when this function is used
-    *
-    * @param string $pass the password to authenticate with
-    * @see set_hash()
-    * @see set_auth_type()
-    * @see set_user()
-    */
-    public function set_password( $pass )
-    {
-        $this->auth_type = 'pass';
-        $this->auth = $pass;
-    }
-
-    /**
-    * Set the hash to authenticate with
-    *
-    * This will set the hash to authenticate with, the auth_type will automatically be set when this function
-    * is used.  This function will automatically strip the newlines from the hash.
-    * @param string $hash the hash to autenticate with
-    * @see set_password()
-    * @see set_auth_type()
-    * @see set_user()
-    */
-    public function set_hash( $hash )
-    {
-        $this->auth_type = 'hash';
-        $this->auth = preg_replace("/(\n|\r|\s)/", '', $hash);
-    }
-
-    /**
-    * Return the user being used for authtication
-    *
-    * This will return the username being authenticated against.
-    *
-    * @return string
-    */
-    public function get_user()
-    {
-        return $this->user;
-    }
-
-    /**
-    * Set the user to authenticate against
-    *
-    * This will set the user being authenticated against.
-    * @param string $user username
-    * @see set_password()
-    * @see set_hash()
-    * @see get_user()
-    */
-    public function set_user( $user )
-    {
-        $this->user = $user;
-    }
-
-    /**
-    * Set the user and hash to be used for authentication
-    *
-    * This function will allow one to set the user AND hash to be authenticated with
-    *
-    * @param string $user username
-    * @param string $hash WHM Access Hash
-    * @see set_hash()
-    * @see set_user()
-    */
-    public function hash_auth( $user, $hash )
-    {
-        $this->set_hash( $hash );
-        $this->set_user( $user );
-    }
-
-    /**
-    * Set the user and password to be used for authentication
-    *
-    * This function will allow one to set the user AND password to be authenticated with
-    * @param string $user username
-    * @param string $pass password
-    * @see set_pass()
-    * @see set_user()
-    */
-    public function password_auth( $user, $pass )
-    {
-        $this->set_password( $pass );
-        $this->set_user( $user );
-    }
-
-    /**
-    * Return XML format
-    *
-    * this function will cause call functions to return XML format, this is the same as doing:
-    *   set_output('xml')
-    *
-    * @see set_output()
-    */
-    public function return_xml()
-    {
-        $this->set_output('json');
-    }
-
-    /**
-    * Return simplexml format
-    *
-    * this function will cause all call functions to return simplexml format, this is the same as doing:
-    *   set_output('simplexml')
-    *
-    * @see set_output()
-    */
-    public function return_object()
-    {
-        $this->set_output('json');
-    }
-
-    /**
-    * Set the HTTP client to use
-    *
-    * This class is capable of two types of HTTP Clients:
-    *   - curl
-    *   - fopen
-    *
-    * When using allow url fopen the class will use get_file_contents to perform the query
-    * The only two acceptable parameters for this function are 'curl' and 'fopen'.
-    * This will default to fopen, however if allow_url_fopen is disabled inside of php.ini
-    * it will switch to curl
-    *
-     * @param string client The http client to use
-    * @see get_http_client()
-    */
-
-    public function set_http_client( $client )
-    {
-        if ( ( $client != 'curl' ) && ( $client != 'fopen' ) ) {
-            throw new Exception('only curl and fopen and allowed http clients');
-        }
-        $this->http_client = $client;
-    }
-
-    /**
-    * Get the HTTP Client in use
-    *
-    * This will return a string containing the HTTP client currently in use
-    *
-    * @see set_http_client()
-    * @return string
-    */
-    public function get_http_client()
-    {
-        return $this->http_client;
-    }
-
-     /*
-    *	Query Functions
-    *	--
-    *	This is where the actual calling of the XML-API, building API1 & API2 calls happens
-    */
-
-    /**
-    * Perform an XML-API Query
-    *
-    * This function will perform an XML-API Query and return the specified output format of the call being made
-    *
-    * @param string $function The XML-API call to execute
-    * @param array $vars An associative array of the parameters to be passed to the XML-API Calls
-    * @return mixed
-    */
-    public function xmlapi_query( $function, $vars = array() )
-    {
-        // Check to make sure all the data needed to perform the query is in place
-        if (!$function) {
-            throw new Exception('xmlapi_query() requires a function to be passed to it');
-        }
-
-        if ($this->user == null) {
-            throw new Exception('no user has been set');
-        }
-
-        if ($this->auth ==null) {
-            throw new Exception('no authentication information has been set');
-        }
-
-        // Build the query:
-
-        $query_type = '/xml-api/';
-
-        if ($this->output == 'json') {
-            $query_type = '/json-api/';
-        }
-
-        $args = http_build_query($vars, '', '&');
-        $url =  $this->protocol . '://' . $this->host . ':' . $this->port . $query_type . $function;
-
-        if ($this->debug) {
-            error_log('URL: ' . $url);
-            error_log('DATA: ' . $args);
-        }
-
-        // Set the $auth string
-
-        $authstr = NULL;
-        if ($this->auth_type == 'hash') {
-            $authstr = 'Authorization: WHM ' . $this->user . ':' . $this->auth . "\r\n";
-        } elseif ($this->auth_type == 'pass') {
-            $authstr = 'Authorization: Basic ' . base64_encode($this->user .':'. $this->auth) . "\r\n";
-        } else {
-            throw new Exception('invalid auth_type set');
-        }
-
-        if ($this->debug) {
-            error_log("Authentication Header: " . $authstr ."\n");
-        }
-
-        // Perform the query (or pass the info to the functions that actually do perform the query)
-
-        $response = NULL;
-        if ($this->http_client == 'curl') {
-            $response = $this->curl_query($url, $args, $authstr);
-        } elseif ($this->http_client == 'fopen') {
-            $response = $this->fopen_query($url, $args, $authstr);
-        }
-
-        /*
-        *	Post-Query Block
-        * Handle response, return proper data types, debug, etc
-        */
-
-        // print out the response if debug mode is enabled.
-        if ($this->debug) {
-            error_log("RESPONSE:\n " . $response);
-        }
-
-        // The only time a response should contain <html> is in the case of authentication error
-        // cPanel 11.25 fixes this issue, but if <html> is in the response, we'll error out.
-
-        if (stristr($response, '<html>') == true) {
-            if (stristr($response, 'Login Attempt Failed') == true) {
-                error_log("Login Attempt Failed");
-
-                return;
-            }
-            if (stristr($response, 'action="/login/"') == true) {
-                error_log("Authentication Error");
-
-                return;
-            }
-
-            return;
-        }
-
-
-        // perform simplexml transformation (array relies on this)
-        if ( ($this->output == 'simplexml') || $this->output == 'array') {
-            $response = simplexml_load_string($response, null, LIBXML_NOERROR | LIBXML_NOWARNING);
-            if (!$response) {
-                    error_log("Some error message here");
-
-                    return;
-            }
-            if ($this->debug) {
-                error_log("SimpleXML var_dump:\n" . print_r($response, true));
-            }
-        }
-
-        // perform array tranformation
-        if ($this->output == 'array') {
-            $response = $this->unserialize_xml($response);
-            if ($this->debug) {
-                error_log("Associative Array var_dump:\n" . print_r($response, true));
-            }
-        }
-
-        return $response;
-    }
-
-    private function curl_query( $url, $postdata, $authstr )
-    {
-        $curl = curl_init();
-        curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 0);
-        // Return contents of transfer on curl_exec
-         curl_setopt($curl, CURLOPT_RETURNTRANSFER, 1);
-        // Allow self-signed certs
-        curl_setopt($curl, CURLOPT_SSL_VERIFYHOST, 0);
-        // Set the URL
-        curl_setopt($curl, CURLOPT_URL, $url);
-        // Increase buffer size to avoid "funny output" exception
-        curl_setopt($curl, CURLOPT_BUFFERSIZE, 131072);
-
-        // Pass authentication header
-        $header[0] =$authstr .
-            "Content-Type: application/x-www-form-urlencoded\r\n" .
-            "Content-Length: " . strlen($postdata) . "\r\n" . "\r\n" . $postdata;
-
-        curl_setopt($curl, CURLOPT_HTTPHEADER, $header);
-
-        curl_setopt($curl, CURLOPT_POST, 1);
-
-        $result = curl_exec($curl);
-        if ($result == false) {
-            throw new Exception("curl_exec threw error \"" . curl_error($curl) . "\" for " . $url . "?" . $postdata );
-        }
-        curl_close($curl);
-
-        return $result;
-    }
-
-    private function fopen_query( $url, $postdata, $authstr )
-    {
-        if ( !(ini_get('allow_url_fopen') ) ) {
-            throw new Exception('fopen_query called on system without allow_url_fopen enabled in php.ini');
-        }
-
-        $opts = array(
-            'http' => array(
-                'allow_self_signed' => true,
-                'method' => 'POST',
-                'header' => $authstr .
-                    "Content-Type: application/x-www-form-urlencoded\r\n" .
-                    "Content-Length: " . strlen($postdata) . "\r\n" .
-                    "\r\n" . $postdata
-            )
-        );
-        $context = stream_context_create($opts);
-
-        return file_get_contents($url, false, $context);
-    }
-
-
-    /*
-    * Convert simplexml to associative arrays
-    *
-    * This function will convert simplexml to associative arrays.
-    */
-    private function unserialize_xml($input, $callback = null, $recurse = false)
-    {
-        // Get input, loading an xml string with simplexml if its the top level of recursion
-        $data = ( (!$recurse) && is_string($input) ) ? simplexml_load_string($input) : $input;
-        // Convert SimpleXMLElements to array
-        if ($data instanceof SimpleXMLElement) {
-            $data = (array) $data;
-        }
-        // Recurse into arrays
-        if (is_array($data)) {
-            foreach ($data as &$item) {
-                $item = $this->unserialize_xml($item, $callback, true);
-            }
-        }
-        // Run callback and return
-        return (!is_array($data) && is_callable($callback)) ? call_user_func($callback, $data) : $data;
-    }
-
-
-    /* TO DO:
-      Implement API1 and API2 query functions!!!!!
-    */
-    /**
-    * Call an API1 function
-    *
-    * This function allows you to call API1 from within the XML-API,  This allowes a user to peform actions
-    * such as adding ftp accounts, etc
-    *
-    * @param string $user The username of the account to perform API1 actions on
-    * @param string $module The module of the API1 call to use
-    * @param string $function The function of the API1 call
-    * @param array $args The arguments for the API1 function, this should be a non-associative array
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/CallingAPIFunctions XML API Call documentation
-    * @link http://docs.cpanel.net/twiki/bin/view/DeveloperResources/ApiRef/WebHome API1 & API2 Call documentation
-    * @link http://docs.cpanel.net/twiki/bin/view/DeveloperResources/ApiBasics/CallingApiOne API1 Documentation
-    */
-    public function api1_query($user, $module, $function, $args = array() )
-    {
-        if ( !isset($module) || !isset($function) || !isset($user) ) {
-            error_log("api1_query requires that a module and function are passed to it");
-
-            return false;
-        }
-
-        if (!is_array($args)) {
-            error_log('api1_query requires that it is passed an array as the 4th parameter');
-
-            return false;
-        }
-
-        $cpuser = 'cpanel_xmlapi_user';
-        $module_type = 'cpanel_xmlapi_module';
-        $func_type = 'cpanel_xmlapi_func';
-        $api_type = 'cpanel_xmlapi_apiversion';
-
-        if ( $this->get_output() == 'json' ) {
-            $cpuser = 'cpanel_jsonapi_user';
-            $module_type = 'cpanel_jsonapi_module';
-            $func_type = 'cpanel_jsonapi_func';
-            $api_type = 'cpanel_jsonapi_apiversion';
-        }
-
-        $call = array(
-                $cpuser => $user,
-                $module_type => $module,
-                $func_type => $function,
-                $api_type => '1'
-            );
-        for ($int = 0; $int < count($args);  $int++) {
-            $call['arg-' . $int] = $args[$int];
-        }
-
-        return $this->xmlapi_query('cpanel', $call);
-    }
-
-    /**
-    * Call an API2 Function
-    *
-    * This function allows you to call an API2 function, this is the modern API for cPanel and should be used in preference over
-    * API1 when possible
-    *
-    * @param string $user The username of the account to perform API2 actions on
-    * @param string $module The module of the API2 call to use
-    * @param string $function The function of the API2 call
-    * @param array $args An associative array containing the arguments for the API2 call
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/CallingAPIFunctions XML API Call documentation
-    * @link http://docs.cpanel.net/twiki/bin/view/DeveloperResources/ApiRef/WebHome API1 & API2 Call documentation
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/ApiTwo Legacy API2 Documentation
-    * @link http://docs.cpanel.net/twiki/bin/view/DeveloperResources/ApiBasics/CallingApiTwo API2 Documentation
-    */
-
-    public function api2_query($user, $module, $function, $args = array())
-    {
-        if (!isset($user) || !isset($module) || !isset($function) ) {
-            error_log("api2_query requires that a username, module and function are passed to it");
-
-            return false;
-        }
-        if (!is_array($args)) {
-            error_log("api2_query requires that an array is passed to it as the 4th parameter");
-
-            return false;
-        }
-
-        $cpuser = 'cpanel_xmlapi_user';
-        $module_type = 'cpanel_xmlapi_module';
-        $func_type = 'cpanel_xmlapi_func';
-        $api_type = 'cpanel_xmlapi_apiversion';
-
-        if ( $this->get_output() == 'json' ) {
-            $cpuser = 'cpanel_jsonapi_user';
-            $module_type = 'cpanel_jsonapi_module';
-            $func_type = 'cpanel_jsonapi_func';
-            $api_type = 'cpanel_jsonapi_apiversion';
-        }
-
-        $args[$cpuser] = $user;
-        $args[$module_type] = $module;
-        $args[$func_type] = $function;
-        $args[$api_type] = '2';
-
-        return $this->xmlapi_query('cpanel', $args);
-    }
-
-    ####
-    #  XML API Functions
-    ####
-
-    /**
-    * Return a list of available XML-API calls
-    *
-    * This function will return an array containing all applications available within the XML-API
-    *
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/ListAvailableCalls XML API Call documentation
-    */
-    public function applist()
-    {
-        return $this->xmlapi_query('applist');
-    }
-
-    ####
-    # Account functions
-    ####
-
-    /**
-    * Create a cPanel Account
-    *
-    * This function will allow one to create an account, the $acctconf parameter requires that the follow
-    * three associations are defined:
-    *	- username
-    *	- password
-    *	- domain
-    *
-    * Failure to prive these will cause an error to be logged.  Any other key/value pairs as defined by the createaccount call
-    * documentation are allowed parameters for this call.
-    *
-    * @param array $acctconf
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/CreateAccount XML API Call documentation
-    */
-
-    public function createacct($acctconf)
-    {
-        if (!is_array($acctconf)) {
-            error_log("createacct requires that first parameter passed to it is an array");
-
-            return false;
-        }
-        if (!isset($acctconf['username']) || !isset($acctconf['password']) || !isset($acctconf['domain'])) {
-            error_log("createacct requires that username, password & domain elements are in the array passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query('createacct', $acctconf);
-    }
-
-    /**
-    * Change a cPanel Account's Password
-    *
-    * This function will allow you to change the password of a cpanel account
-    *
-    * @param string $username The username to change the password of
-    * @param string $pass The new password for the cPanel Account
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/ChangePassword XML API Call documentation
-    */
-    public function passwd($username, $pass)
-    {
-        if (!isset($username) || !isset($pass)) {
-            error_log("passwd requires that an username and password are passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query('passwd', array('user' => $username, 'pass' => $pass));
-    }
-
-    /**
-    * Limit an account's monthly bandwidth usage
-    *
-    * This function will set an account's bandwidth limit.
-    *
-    * @param string $username The username of the cPanel account to modify
-    * @param int $bwlimit The new bandwidth limit in megabytes
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/LimitBandwidth XML API Call documentation
-    */
-    public function limitbw($username, $bwlimit)
-    {
-        if (!isset($username) || !isset($bwlimit)) {
-            error_log("limitbw requires that an username and bwlimit are passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query('limitbw', array('user' => $username, 'bwlimit' => $bwlimit));
-    }
-
-    /**
-    * List accounts on Server
-    *
-    * This call will return a list of account on a server, either no parameters or both parameters may be passed to this function.
-    *
-    * @param string $searchtype Type of account search to use, allowed values: domain, owner, user, ip or package
-    * @param string $search the string to search against
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/ListAccounts XML API Call documentation
-    */
-    public function listaccts($searchtype = null, $search = null)
-    {
-        if ($search) {
-            return $this->xmlapi_query('listaccts', array('searchtype' => $searchtype, 'search' => $search ));
-        }
-
-        return $this->xmlapi_query('listaccts');
-    }
-
-    /**
-    * Modify a cPanel account
-    *
-    * This call will allow you to change limitations and information about an account.  See the XML API call documentation for a list of
-    * acceptable values for args.
-    *
-    * @param string $username The username to modify
-    * @param array $args the new values for the modified account (see {@link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/ModifyAccount modifyacct documentation})
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/ModifyAccount XML API Call documentation
-    */
-    public function modifyacct($username, $args = array())
-    {
-        if (!isset($username)) {
-            error_log("modifyacct requires that username is passed to it");
-
-            return false;
-        }
-        $args['user'] = $username;
-        if (sizeof($args) < 2) {
-            error_log("modifyacct requires that at least one attribute is passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query('modifyacct', $args);
-    }
-
-    /**
-    * Edit a cPanel Account's Quota
-    *
-    * This call will allow you to change a cPanel account's quota
-    *
-    * @param string $username The username of the account to modify the quota.
-    * @param int $quota the new quota in megabytes
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/EditQuota XML API Call documentation
-    */
-    public function editquota($username, $quota)
-    {
-        if (!isset($username) || !isset($quota)) {
-            error_log("editquota requires that an username and quota are passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query('editquota', array('user' => $username, 'quota' => $quota));
-    }
-
-    /**
-    * Return a summary of the account's information
-    *
-    * This call will return a brief report of information about an account, such as:
-    *	- Disk Limit
-    *	- Disk Used
-    *	- Domain
-    *	- Account Email
-    *	- Theme
-    * 	- Start Data
-    *
-    * Please see the XML API Call documentation for more information on what is returned by this call
-    *
-    * @param string $username The username to retrieve a summary of
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/ShowAccountInformation XML API Call documenation
-    */
-    public function accountsummary($username)
-    {
-        if (!isset($username)) {
-            error_log("accountsummary requires that an username is passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query('accountsummary', array('user' => $username));
-    }
-
-    /**
-    * Suspend a User's Account
-    *
-    * This function will suspend the specified cPanel users account.
-    * The $reason parameter is optional, but can contain a string of any length
-    *
-    * @param string $username The username to suspend
-    * @param string $reason The reason for the suspension
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/SuspendAccount XML API Call documentation
-    */
-    public function suspendacct($username, $reason = null)
-    {
-        if (!isset($username)) {
-            error_log("suspendacct requires that an username is passed to it");
-
-            return false;
-        }
-        if ($reason) {
-            return $this->xmlapi_query('suspendacct', array('user' => $username, 'reason' => $reason ));
-        }
-
-        return $this->xmlapi_query('suspendacct', array('user' => $username));
-    }
-
-    /**
-    * List suspended accounts on a server
-    *
-    * This function will return an array containing all the suspended accounts on a server
-    *
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/ListSuspended XML API Call documentation
-    */
-    public function listsuspended()
-    {
-        return $this->xmlapi_query('listsuspended');
-    }
-
-    /**
-    * Remove an Account
-    *
-    * This XML API call will remove an account on the server
-    * The $keepdns parameter is optional, when enabled this will leave the DNS zone on the server
-    *
-    * @param string $username The usename to delete
-    * @param bool $keepdns When pass a true value, the DNS zone will be retained
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/TerminateAccount
-    */
-    public function removeacct($username, $keepdns = false)
-    {
-        if (!isset($username)) {
-            error_log("removeacct requires that a username is passed to it");
-
-            return false;
-        }
-        if ($keepdns) {
-            return $this->xmlapi_query('removeacct', array('user' => $username, 'keepdns' => '1'));
-        }
-
-        return $this->xmlapi_query('removeacct', array('user' => $username));
-    }
-
-    /**
-    * Unsuspend an Account
-    *
-    * This XML API call will unsuspend an account
-    *
-    * @param string $username The username to unsuspend
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/UnsuspendAcount XML API Call documentation
-     */
-    public function unsuspendacct($username)
-    {
-        if (!isset($username)) {
-            error_log("unsuspendacct requires that a username is passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query('unsuspendacct', array('user' => $username));
-    }
-
-    /**
-    * Change an Account's Package
-    *
-    * This XML API will change the package associated account.
-    *
-    * @param string $username the username to change the package of
-    * @param string $pkg The package to change the account to.
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/ChangePackage XML API Call documentation
-    */
-    public function changepackage($username, $pkg)
-    {
-        if (!isset($username) || !isset($pkg)) {
-            error_log("changepackage requires that username and pkg are passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query('changepackage', array('user' => $username, 'pkg' => $pkg));
-    }
-
-    /**
-    * Return the privileges a reseller has in WHM
-    *
-    * This will return a list of the privileges that a reseller has to WHM
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/ViewPrivileges XML API Call documentation
-    */
-    public function myprivs()
-    {
-        return $this->xmlapi_query('myprivs');
-    }
-
-
-    /**
-    * Display Data about a Virtual Host
-    *
-    * This function will return information about a specific domain.  This data is essentially a representation of the data
-    * Contained in the httpd.conf VirtualHost for the domain.
-    *
-    * @return mixed
-    * @param string $domain The domain to fetch information for
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/DomainUserData
-    */
-
-    public function domainuserdata( $domain )
-    {
-        if (!isset( $domain ) ) {
-            error_log("domainuserdata requires that domain is passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query("domainuserdata", array( 'domain' => $domain ) );
-    }
-
-    /**
-    * Change a site's IP Address
-    *
-    * This function will allow you to change the IP address that a domain listens on.
-    * In order to properly call this function Either $user or $domain parameters must be defined
-    * @param string $ip The $ip address to change the account or domain to
-    * @param string $user The username to change the IP of
-    * @param string $domain The domain to change the IP of
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/SetSiteIp XML API Call documentation
-    */
-    public function setsiteip ( $ip, $user = null, $domain = null )
-    {
-        if ( !isset($ip) ) {
-            error_log("setsiteip requires that ip is passed to it");
-
-            return false;
-        }
-
-        if ($user == null && $domain == null) {
-            error_log("setsiteip requires that either domain or user is passed to it");
-
-            return false;
-        }
-
-        if ($user == null) {
-            return $this->xmlapi_query( "setsiteip", array( "ip" => $ip, "domain" => $domain ) );
-        } else {
-            return $this->xmlapi_query( "setsiteip", array( "ip" => $ip, "user" => $user ) );
-        }
-    }
-
-    ####
-    # DNS Functions
-    ####
-
-    // This API function lets you create a DNS zone.
-    /**
-    * Add a DNS Zone
-    *
-    * This XML API function will create a DNS Zone.  This will use the "standard" template when
-    * creating the zone.
-    *
-    * @param string $domain The DNS Domain that you wish to create a zone for
-    * @param string $ip The IP you want the domain to resolve to
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/AddDNSZone XML API Call documentation
-    */
-    public function adddns($domain, $ip)
-    {
-        if (!isset($domain) || !isset($ip)) {
-            error_log("adddns require that domain, ip are passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query('adddns', array('domain' => $domain, 'ip' => $ip));
-    }
-
-    /**
-    * Add a record to a zone
-    *
-    * This will append a record to a DNS Zone.  The $args argument to this function
-    * must be an associative array containing information about the DNS zone, please
-    * see the XML API Call documentation for more info
-    *
-    * @param string $zone The DNS zone that you want to add the record to
-    * @param array $args Associative array representing the record to be added
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/AddZoneRecord XML API Call documentation
-    */
-    public function addzonerecord( $zone, $args )
-    {
-        if (!is_array($args)) {
-            error_log("addzonerecord requires that $args passed to it is an array");
-
-            return;
-        }
-
-        $args['zone'] = $zone;
-
-        return $this->xmlapi_query('addzonerecord', $args);
-    }
-
-    /**
-    * Edit a Zone Record
-    *
-    * This XML API Function will allow you to edit an existing DNS Zone Record.
-    * This works by passing in the line number of the record you wish to edit.
-    * Line numbers can be retrieved with dumpzone()
-    *
-    * @param string $zone The zone to edit
-    * @param int $line The line number of the zone to edit
-    * @param array $args An associative array representing the zone record
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/EditZoneRecord XML API Call documentation
-    * @see dumpzone()
-    */
-
-    public function editzonerecord( $zone, $line, $args )
-    {
-        if (!is_array($args)) {
-            error_log("editzone requires that $args passed to it is an array");
-
-            return;
-        }
-
-        $args['domain'] = $zone;
-        $args['Line'] = $line;
-
-        return $this->xmlapi_query('editzonerecord', $args);
-    }
-
-    /**
-    * Retrieve a DNS Record
-    *
-    * This function will return a data structure representing a DNS record, to
-    * retrieve all lines see dumpzone.
-    * @param string $zone The zone that you want to retrieve a record from
-    * @param string $line The line of the zone that you want to retrieve
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/GetZoneRecord XML API Call documentation
-    */
-    public function getzonerecord( $zone, $line )
-    {
-        return $this->xmlapi_query('getzonerecord', array( 'domain' => $zone, 'Line' => $line ) );
-    }
-
-    /**
-    * Remove a DNS Zone
-    *
-    * This function will remove a DNS Zone from the server
-    *
-    * @param string $domain The domain to be remove
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/DeleteDNSZone XML API Call documentation
-    */
-    public function killdns($domain)
-    {
-        if (!isset($domain)) {
-            error_log("killdns requires that domain is passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query('killdns', array('domain' => $domain));
-    }
-
-    /**
-    * Return a List of all DNS Zones on the server
-    *
-    * This XML API function will return an array containing all the DNS Zones on the server
-    *
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/ListDNSZone XML API Call documentation
-    */
-    public function listzones()
-    {
-        return $this->xmlapi_query('listzones');
-    }
-
-    /**
-    * Return all records in a zone
-    *
-    * This function will return all records within a zone.
-    * @param string $domain The domain to return the records from.
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/ListOneZone XML API Call documentation
-    * @see editdnsrecord()
-    * @see getdnsrecord()
-    */
-    public function dumpzone($domain)
-    {
-        if (!isset($domain)) {
-            error_log("dumpzone requires that a domain is passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query('dumpzone', array('domain' => $domain));
-    }
-
-    /**
-    * Return a Nameserver's IP
-    *
-    * This function will return a nameserver's IP
-    *
-    * @param string $nameserver The nameserver to lookup
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/LookupIP XML API Call documentation
-    */
-    public function lookupnsip($nameserver)
-    {
-        if (!isset($nameserver)) {
-            error_log("lookupnsip requres that a nameserver is passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query('lookupnsip', array('nameserver' => $nameserver));
-    }
-
-    /**
-    * Remove a line from a zone
-    *
-    * This function will remove the specified line from a zone
-    * @param string $zone The zone to remove a line from
-    * @param int $line The line to remove from the zone
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/RemoveZone XML API Call documentation
-    */
-    public function removezonerecord($zone, $line)
-    {
-        if ( !isset($zone) || !isset($line) ) {
-            error_log("removezone record requires that a zone and line number is passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query('removezonerecord', array('zone' => $zone, 'Line' => $line) );
-    }
-
-    /**
-    * Reset a zone
-    *
-    * This function will reset a zone removing all custom records.  Subdomain records will be readded by scanning the userdata datastore.
-    * @param string $domain the domain name of the zone to reset
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/ResetZone XML API Call documentation
-    */
-    public function resetzone($domain)
-    {
-        if ( !isset($domain) ) {
-            error_log("resetzone requires that a domain name is passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query('resetzone', array('domain' => $domain));
-    }
-
-    ####
-    # Package Functions
-    ####
-
-    /**
-    * Add a new package
-    *
-    * This function will allow you to add a new package
-    * This function should be passed an associative array containing elements that define package parameters.
-    * These variables map directly to the parameters for the XML-API Call, please refer to the link below for a complete
-    * list of possible variable.  The "name" element is required.
-    * @param array $pkg an associative array containing package parameters
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/AddPackage XML API Call documentation
-    */
-    public function addpkg($pkg)
-    {
-        if (!isset($pkg['name'])) {
-            error_log("addpkg requires that name is defined in the array passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query('addpkg', $pkg);
-    }
-
-    /**
-    * Remove a package
-    *
-    * This function allow you to delete a package
-    * @param string $pkgname The package you wish to delete
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/DeletePackage XML API Call documentation
-    */
-    public function killpkg($pkgname)
-    {
-        if (!isset($pkgname)) {
-            error_log("killpkg requires that the package name is passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query('killpkg', array('pkg' => $pkgname));
-    }
-
-    /**
-    * Edit a package
-    *
-    * This function allows you to change a package's paremeters.  This is passed an associative array defining
-    * the parameters for the package.  The keys within this array map directly to the XML-API call, please see the link
-    * below for a list of possible keys within this package.  The name element is required.
-    * @param array $pkg An associative array containing new parameters for the package
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/EditPackage XML API Call documentation
-    */
-    public function editpkg($pkg)
-    {
-        if (!isset($pkg['name'])) {
-            error_log("editpkg requires that name is defined in the array passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query('editpkg', $pkg);
-    }
-
-    /**
-    * List Packages
-    *
-    * This function will list all packages available to the user
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/ListPackages XML API Call documentation
-    */
-    public function listpkgs()
-    {
-        return $this->xmlapi_query('listpkgs');
-    }
-
-    ####
-    # Reseller functions
-    ####
-
-    /**
-    * Make a user a reseller
-    *
-    * This function will allow you to mark an account as having reseller privileges
-    * @param string $username The username of the account you wish to add reseller privileges to
-    * @param int $makeowner Boolean 1 or 0 defining whether the account should own itself or not
-    * @see setacls()
-    * @see setresellerlimits()
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/AddResellerPrivileges XML API Call documentation
-    */
-    public function setupreseller($username, $makeowner = true)
-    {
-        if (!isset($username)) {
-            error_log("setupreseller requires that username is passed to it");
-
-            return false;
-        }
-        if ($makeowner) {
-            return $this->xmlapi_query('setupreseller', array('user' => $username, 'makeowner' => '1'));
-        }
-
-        return $this->xmlapi_query('setupreseller', array('user' => $username, 'makeowner' => '0'));
-    }
-
-    /**
-    * Create a New ACL List
-    *
-    * This function allows you to create a new privilege set for reseller accounts.  This is passed an
-    * Associative Array containing the configuration information for this variable.  Please see the XML API Call documentation
-    * For more information.  "acllist" is a required element within this array
-    * @param array $acl an associative array describing the parameters for the ACL to be create
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/CreateResellerACLList XML API Call documentation
-    */
-    public function saveacllist($acl)
-    {
-        if (!isset($acl['acllist'])) {
-            error_log("saveacllist requires that acllist is defined in the array passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query('saveacllist', $acl);
-    }
-
-
-    /**
-    * List available saved ACLs
-    *
-    * This function will return a list of Saved ACLs for reseller accounts
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/ListCurrentResellerACLLists XML API Call documentation
-    */
-    public function listacls()
-    {
-        return $this->xmlapi_query('listacls');
-    }
-
-    /**
-    * List Resellers
-    *
-    * This function will return a list of resellers on the server
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/ListResellerAccounts XML API Call documentation
-    */
-    public function listresellers()
-    {
-        return $this->xmlapi_query('listresellers');
-    }
-
-    /**
-    * Get a reseller's statistics
-    *
-    * This function will return general information on a reseller and all it's account individually such as disk usage and bandwidth usage
-    *
-    * @param string $username The reseller to be checked
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/ListResellersAccountsInformation XML API Call documentation
-    */
-    public function resellerstats($username)
-    {
-        if (!isset($username)) {
-            error_log("resellerstats requires that a username is passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query('resellerstats', array('reseller' => $username));
-    }
-
-    /**
-    * Remove Reseller Privileges
-    *
-    * This function will remove an account's reseller privileges, this does not remove the account.
-    *
-    * @param string $username The username to remove reseller privileges from
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/RemoveResellerPrivileges XML API Call documentation
-    */
-    public function unsetupreseller($username)
-    {
-        if (!isset($username)) {
-            error_log("unsetupreseller requires that a username is passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query('unsetupreseller', array('user' => $username));
-    }
-
-    /**
-    * Set a reseller's privileges
-    *
-    * This function will allow you to set what parts of WHM a reseller has access to.  This is passed an associative array
-    * containing the privleges that this reseller should have access to.  These map directly to the parameters passed to the XML API Call
-    * Please view the XML API Call documentation for more information.  "reseller" is the only required element within this array
-    * @param array $acl An associative array containing all the ACL information for the reseller
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/SetResellersACLList XML API Call documentation
-    */
-    public function setacls($acl)
-    {
-        if (!isset($acl['reseller'])) {
-            error_log("setacls requires that reseller is defined in the array passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query('setacls', $acl);
-    }
-
-    /**
-    * Terminate a Reseller's Account
-    *
-    * This function will terminate a reseller's account and all accounts owned by the reseller
-    *
-    * @param string $reseller the name of the reseller to terminate
-    * @param boolean $terminatereseller Passing this as true will terminate the the reseller's account as well as all the accounts owned by the reseller
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/TerminateResellerandAccounts XML API Call documentation
-    *
-    **/
-    public function terminatereseller($reseller, $terminatereseller = true)
-    {
-        if (!isset($reseller)) {
-            error_log("terminatereseller requires that username is passed to it");
-
-            return false;
-        }
-        $verify = 'I understand this will irrevocably remove all the accounts owned by the reseller ' . $reseller;
-        if ($terminatereseller) {
-            return $this->xmlapi_query('terminatereseller', array('reseller' => $reseller, 'terminatereseller' => '1', 'verify' => $verify));
-        }
-
-        return $this->xmlapi_query('terminatereseller', array('reseller' => $reseller, 'terminatereseller' => '0', 'verify' => $verify));
-    }
-
-    /**
-    * Set a reseller's dedicated IP addresses
-    *
-    * This function will set a reseller's dedicated IP addresses.  If an IP is not passed to this function,
-    * it will reset the reseller to use the server's main shared IP address.
-    * @param string $user The username of the reseller to change dedicated IPs for
-    * @param string $ip The IP to assign to the  reseller, this can be a comma-seperated list of IPs to allow for multiple IP addresses
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/SetResellerIps XML API Call documentation
-    */
-    public function setresellerips($user, $ip = null)
-    {
-        if (!isset($user) ) {
-            error_log("setresellerips requires that a username is passed to it");
-
-            return false;
-        }
-        $params = array("user" => $user);
-        if ($ip != null) {
-            $params['ip'] = $ip;
-        }
-
-        return $this->xmlapi_query('setresellerips',$params);
-    }
-
-    /**
-    * Set Accounting Limits for a reseller account
-    *
-    * This function allows you to define limits for reseller accounts not included with in access control such as
-    * the number of accounts a reseller is allowed to create, the amount of disk space to use.
-    * This function is passed an associative array defining these limits, these map directly to the parameters for the XML API
-    * Call, please refer to the XML API Call documentation for more information.  The only required parameters is "user"
-    *
-    * @param array $reseller_cfg An associative array containing configuration information for the specified reseller
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/SetResellerLimits XML API Call documentation
-    *
-    */
-    public function setresellerlimits( $reseller_cfg )
-    {
-        if ( !isset($reseller_cfg['user'] ) ) {
-            error_log("setresellerlimits requires that a user is defined in the array passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query('setresellerlimits',$reseller_cfg);
-    }
-
-    /**
-    * Set a reseller's main IP
-    *
-    * This function will allow you to set a reseller's main IP.  By default all accounts created by this reseller
-    * will be created on this IP
-    * @param string $reseller the username of the reseller to change the main IP of
-    * @param string $ip The ip you would like this reseller to create accounts on by default
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/SetResellerMainIp XML API Call documentation
-    */
-    public function setresellermainip($reseller, $ip)
-    {
-        if ( !isset($reseller) || !isset($ip) ) {
-            error_log("setresellermainip requires that an reseller and ip are passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query("setresellermainip", array('user' => $reseller, 'ip' => $ip));
-    }
-
-    /**
-    * Set reseller package limits
-    *
-    * This function allows you to define which packages a reseller has access to use
-    * @param string $user The reseller you wish to define package limits for
-    * @param boolean $no_limit Whether or not you wish this reseller to have packages limits
-    * @param string $package if $no_limit is false, then the package you wish to modify privileges for
-    * @param boolean $allowed if $no_limit is false, then defines if the reseller should have access to the package or not
-    * @param int $number if $no_limit is false, then defines the number of account a reseller can create of a specific package
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/SetResellerPkgLimit XML API Call documentation
-    */
-    public function setresellerpackagelimits($user, $no_limit, $package = null, $allowed = null, $number = null)
-    {
-        if (!isset($user) || !isset($no_limit) ) {
-            error_log("setresellerpackagelimits requires that a username and no_limit are passed to it by default");
-
-            return false;
-        }
-        if ($no_limit) {
-            return $this->xmlapi_query("setresellerpackagelimits", array( 'user' => $user, "no_limit" => '1') );
-        } else {
-            if ( is_null($package) || is_null($allowed) ) {
-                error_log('setresellerpackagelimits requires that package and allowed are passed to it if no_limit eq 0');
-
-                return false;
-            }
-            $params = array(
-                'user' => $user,
-                'no_limit' => '0',
-                'package' => $package,
-            );
-            if ($allowed) {
-                $params['allowed'] = 1;
-            } else {
-                $params['allowed'] = 0;
-            }
-            if ( !is_null($number) ) {
-                $params['number'] = $number;
-            }
-
-            return $this->xmlapi_query('setresellerpackagelimits', $params);
-        }
-    }
-
-    /**
-    * Suspend a reseller and all accounts owned by a reseller
-    *
-    * This function, when called will suspend a reseller account and all account owned by said reseller
-    * @param string $reseller The reseller account to be suspended
-    * @param string $reason (optional) The reason for suspending the reseller account
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/SuspendReseller XML API Call documentation
-    */
-    public function suspendreseller($reseller, $reason = null)
-    {
-        if (!isset($reseller) ) {
-            error_log("suspendreseller requires that the reseller's username is passed to it");
-
-            return false;
-        }
-        $params = array("user" => $reseller);
-        if ($reason) {
-            $params['reason'] = $reason;
-        }
-
-        return $this->xmlapi_query('suspendreseller', $params);
-    }
-
-
-    /**
-    * Unsuspend a Reseller Account
-    *
-    * This function will unsuspend a reseller account and all accounts owned by the reseller in question
-    * @param string $user The username of the reseller to be unsuspended
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/UnsuspendReseller XML API Call documentation
-    */
-    public function unsuspendreseller($user)
-    {
-        if (!isset($user) ) {
-            error_log("unsuspendreseller requires that a username is passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query('unsuspendreseller', array('user' => $user));
-    }
-
-    /**
-    * Get the number of accounts owned by a reseller
-    *
-    * This function will return the number of accounts owned by a reseller account, along with information such as the number of active, suspended and accounting limits
-    * @param string $user The username of the reseller to get account information from
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/AcctCounts XML API Call documentation
-    */
-    public function acctcounts($user)
-    {
-        if (!isset($user)) {
-            error_log('acctcounts requires that a username is passed to it');
-
-            return false;
-        }
-
-        return $this->xmlapi_query('acctcounts', array('user' => $user) );
-    }
-
-    /**
-    * Set a reseller's nameservers
-    *
-    * This function allows you to change the nameservers that account created by a specific reseller account will use.
-    * If this function is not passed a $nameservers parameter, it will reset the nameservers for the reseller to the servers's default
-    * @param string $user The username of the reseller account to grab reseller accounts from
-    * @param string $nameservers A comma seperate list of nameservers
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/SetResellerNameservers XML API Call documentation
-    */
-    public function setresellernameservers($user, $nameservers = null)
-    {
-        if (!isset($user)) {
-            error_log("setresellernameservers requires that a username is passed to it");
-
-            return false;
-        }
-        $params = array('user' => $user);
-        if ($nameservers) {
-            $params['nameservers'] = $nameservers;
-        }
-
-        return $this->xmlapi_query('setresellernameservers', $params);
-    }
-
-    ####
-    # Server information
-    ####
-
-    /**
-    * Get a server's hostname
-    *
-    * This function will return a server's hostname
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/DisplayServerHostname XML API Call documentation
-    */
-    public function gethostname()
-    {
-        return $this->xmlapi_query('gethostname');
-    }
-
-    /**
-    * Get the version of cPanel running on the server
-    *
-    * This function will return the version of cPanel/WHM running on the remote system
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/DisplaycPanelWHMVersion XML API Call documentation
-    */
-    public function version()
-    {
-        return $this->xmlapi_query('version');
-    }
-
-
-    /**
-    * Get Load Average
-    *
-    * This function will return the loadavg of the remote system
-    *
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/LoadAvg XML API Call documentation
-    */
-    public function loadavg()
-    {
-        return $this->xmlapi_query('loadavg');
-    }
-
-    /**
-    * Get a list of languages on the remote system
-    *
-    * This function will return a list of available langauges for the cPanel interface
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/GetLangList XML API Call documentation
-    *
-    */
-    public function getlanglist()
-    {
-        return $this->xmlapi_query('getlanglist');
-    }
-
-    ####
-    # Server administration
-    ####
-
-    /**
-    * Reboot server
-    *
-    * This function will reboot the server
-    * @param boolean $force This will determine if the server should be given a graceful or forceful reboot
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/RebootServer XML API Call documentation
-    */
-    public function reboot($force = false)
-    {
-        if ($force) {
-            return $this->xmlapi_query('reboot', array('force' => '1'));
-        }
-
-        return $this->xmlapi_query('reboot');
-    }
-
-    /**
-    * Add an IP to a server
-    *
-    * This function will add an IP alias to your server
-    * @param string $ip The IP to be added
-    * @param string $netmask The netmask of the IP to be added
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/AddIPAddress XML API Call documentation
-    */
-    public function addip($ip, $netmask)
-    {
-        if (!isset($ip) || !isset($netmask)) {
-            error_log("addip requires that an IP address and Netmask are passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query('addip', array('ip' => $ip, 'netmask' => $netmask));
-    }
-
-    // This function allows you to delete an IP address from your server.
-    /**
-    * Delete an IP from a server
-    *
-    * Remove an IP from the server
-    * @param string $ip The IP to remove
-    * @param string $ethernetdev The ethernet device that the IP is bound to
-    * @param bool $skipifshutdown Whether the function should remove the IP even if the ethernet interface is down
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/DeleteIPAddress XML API Call documentation
-    */
-    public function delip($ip, $ethernetdev = null, $skipifshutdown = false)
-    {
-        $args = array();
-        if (!isset($ip)) {
-            error_log("delip requires that an IP is defined in the array passed to it");
-
-            return false;
-        }
-        $args['ip'] = $ip;
-        if ($ethernetdev) {
-            $args['ethernetdev'] = $ethernetdev;
-        }
-        $args['skipifshutdown'] = ($skipifshutdown) ? '1' : '0';
-
-        return $this->xmlapi_query('delip', $args);
-    }
-
-    /**
-    * List IPs
-    *
-    * This should return a list of IPs on a server
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/DeleteIPAddress XML API Call documentation
-    */
-    public function listips()
-    {
-        return $this->xmlapi_query('listips');
-    }
-
-    /**
-    * Set Hostname
-    *
-    * This function will allow you to set the hostname of the server
-    * @param string $hostname the hostname that should be assigned to the serve
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/SetHostname XML API Call documentation
-    */
-    public function sethostname($hostname)
-    {
-        if (!isset($hostname)) {
-            error_log("sethostname requires that hostname is passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query('sethostname', array('hostname' => $hostname));
-    }
-
-    /**
-    * Set the resolvers used by the server
-    *
-    * This function will set the resolvers in /etc/resolv.conf for the server
-    * @param string $nameserver1 The IP of the first nameserver to use
-    * @param string $nameserver2 The IP of the second namesever to use
-    * @param string $nameserver3 The IP of the third nameserver to use
-    * @param string $nameserver4 The IP of the forth nameserver to use
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/SetResolvers XML API Call documentation
-    */
-    public function setresolvers($nameserver1, $nameserver2 = null, $nameserver3 = null)
-    {
-        $args = array();
-        if (!isset($nameserver1)) {
-            error_log("setresolvers requires that nameserver1 is defined in the array passed to it");
-
-            return false;
-        }
-        $args['nameserver1'] = $nameserver1;
-        if ($nameserver2) {
-            $args['nameserver2'] = $nameserver2;
-        }
-        if ($nameserver3) {
-            $args['nameserver3'] = $nameserver3;
-        }
-
-        return $this->xmlapi_query('setresolvers', $args);
-    }
-
-    /**
-    * Display bandwidth Usage
-    *
-    * This function will return all bandwidth usage information for the server,
-    * The arguments for this can be passed in via an associative array, the elements of this array map directly to the
-    * parameters of the call, please see the XML API Call documentation for more information
-    * @param array $args The configuration for what bandwidth information to display
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/ShowBw XML API Call documentation
-    */
-    public function showbw($args = null)
-    {
-        if (is_array($args)) {
-            return $this->xmlapi_query('showbw', $args);
-        }
-
-        return $this->xmlapi_query('showbw');
-    }
-
-    public function nvset($key, $value)
-    {
-        if (!isset($key) || !isset($value)) {
-            error_log("nvset requires that key and value are passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query('nvset', array('key' => $key, 'value' => $value));
-    }
-
-    // This function allows you to retrieve and view a non-volatile variable's value.
-    public function nvget($key)
-    {
-        if (!isset($key)) {
-            error_log("nvget requires that key is passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query('nvget', array('key' => $key));
-    }
-
-    ####
-    # Service functions
-    ####
-
-    /**
-    * Restart a Service
-    *
-    * This function allows you to restart a service on the server
-    * @param string $service the service that you wish to restart please view the XML API Call documentation for acceptable values to this parameters
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/RestartService XML API Call documentation
-    */
-    public function restartsrv($service)
-    {
-        if (!isset($service)) {
-            error_log("restartsrv requires that service is passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query('restartservice', array('service' => $service));
-    }
-
-    /**
-    * Service Status
-    *
-    * This function will return the status of all services on the and whether they are running or not
-    * @param string $service A single service to filter for.
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/ServiceStatus XML API Call documentation
-    */
-    public function servicestatus($args=array())
-     {
-        if (!empty($args) && !is_array($args)) {
-            $args = array('service'=>$args);
-        } elseif (!is_array($args)) {
-            $args = array();
-        }
-
-        return $this->xmlapi_query('servicestatus', $args);
-     }
-
-    /**
-    * Configure A Service
-    *
-    * This function will allow you to enabled or disable services along with their monitoring by chkservd
-    * @param string $service The service to be monitored
-    * @param bool $enabled Whether the service should be enabled or not
-    * @param bool $monitored Whether the service should be monitored or not
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/ConfigureService XML API Call documentation
-    */
-    public function configureservice($service, $enabled = true, $monitored = true)
-    {
-        if (!isset($service)) {
-            error_log("configure service requires that a service is passed to it");
-
-            return false;
-        }
-        $params = array('service' => $service);
-
-        if ($enabled) {
-            $params['enabled'] = 1;
-        } else {
-            $params['enabled'] = 0;
-        }
-
-        if ($monitored) {
-            $params['monitored'] = 1;
-        } else {
-            $params['monitored'] = 0;
-        }
-
-        return $this->xmlapi_query('configureservice', $params);
-
-    }
-
-    ####
-    # SSL functions
-    ####
-
-    /**
-    * Display information on an SSL host
-    *
-    * This function will return information on an SSL Certificate, CSR, cabundle and SSL key for a specified domain
-    * @param array $args Configuration information for the SSL certificate, please see XML API Call documentation for required values
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/FetchSSL XML API Call documentation
-    */
-    public function fetchsslinfo($args)
-    {
-        if ( (isset($args['domain']) && isset($args['crtdata'])) || (!isset($args['domain']) && !isset($args['crtdata'])) ) {
-            error_log("fetchsslinfo requires domain OR crtdata is passed to it");
-        }
-        if (isset($args['crtdata'])) {
-            // crtdata must be URL-encoded!
-            $args['crtdata'] = urlencode(trim($args['crtdata']));
-        }
-
-        return $this->xmlapi_query('fetchsslinfo', $args);
-    }
-
-    /**
-    * Generate an SSL Certificate
-    *
-    * This function will generate an SSL Certificate, the arguments for this map directly to the call for the XML API call.  Please consult the XML API Call documentation for more information
-    * @param array $args the configuration for the SSL Certificate being generated
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/GenerateSSL XML API Call documentation
-    */
-    public function generatessl($args)
-    {
-        if (!isset($args['xemail']) || !isset($args['host']) || !isset($args['country']) || !isset($args['state']) || !isset($args['city']) || !isset($args['co']) || !isset($args['cod']) || !isset($args['email']) || !isset($args['pass'])) {
-            error_log("generatessl requires that xemail, host, country, state, city, co, cod, email and pass are defined in the array passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query('generatessl', $args);
-    }
-
-    /**
-    * Install an SSL certificate
-    *
-    * This function will allow you to install an SSL certificate that is uploaded via the $argument parameter to this call.  The arguments for this call map directly to the parameters for the XML API call,
-    * please consult the XML API Call documentation for more information.
-    * @param array $args The configuration for the SSL certificate
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/InstallSSL XML API Call documentation
-    */
-    public function installssl($args)
-    {
-        if (!isset($args['user']) || !isset($args['domain']) || !isset($args['cert']) || !isset($args['key']) || !isset($args['cab']) || !isset($args['ip'])) {
-            error_log("installssl requires that user, domain, cert, key, cab and ip are defined in the array passed to it");
-
-            return false;
-        }
-
-        return $this->xmlapi_query('installssl', $args);
-    }
-
-    /**
-    * List SSL Certs
-    *
-    * This function will list all SSL certificates installed on the server
-    * @return mixed
-    * @link http://docs.cpanel.net/twiki/bin/view/AllDocumentation/AutomationIntegration/ListSSL XML API Call documentation
-    */
-    public function listcrts()
-    {
-        return $this->xmlapi_query('listcrts');
-    }
-
-    ####
-    # cPanel API1 functions
-    # Note: A cPanel account username is required
-    # Some cPanel features must be enabled to be able to use some function (f.e. park, unpark)
-    ####
-
-    // This API1 function adds a emailaccount for a specific user.
-    public function addpop($username, $args)
-    {
-        if (!isset($username) || !isset($args)) {
-            error_log("addpop requires that a user and args are passed to it");
-
-            return false;
-        }
-        if (is_array($args) && (sizeof($args) < 3)) {
-            error_log("addpop requires that args at least contains an email_username, email_password and email_domain");
-
-            return false;
-        }
-
-        return $this->api1_query($username, 'Email', 'addpop', $args);
-    }
-
-    // This API function parks a domain onto this user's account
-    public function park($username, $newdomain, $topdomain)
-    {
-        $args = array();
-        if ( (!isset($username)) && (!isset($newdomain)) ) {
-            error_log("park requires that a username and new domain are passed to it");
-
-            return false;
-        }
-        $args['domain'] = $newdomain;
-        if ($topdomain) {
-            $args['topdomain'] = $topdomain;
-        }
-
-        return $this->api2_query($username, 'Park', 'park', $args);
-    }
-
-    // This API function unparks a domain from this user's account.
-    public function unpark($username, $domain)
-    {
-        $args = array();
-        if ( (!isset($username)) && (!isset($domain)) ) {
-            error_log("unpark requires that a username and domain are passed to it");
-
-            return false;
-        }
-        $args['domain'] = $domain;
-
-        return $this->api2_query($username, 'Park', 'unpark', $args);
-    }
-
-    ####
-    # cPanel API2 functions
-    # Note: A cPanel account username is required
-    # Some cPanel features must be enabled to be able to use some function
-    ####
-
-    // This API2 function allows you to view the diskusage of a emailaccount.
-    public function getdiskusage($username, $args)
-    {
-        if (!isset($username) || !isset($args)) {
-            error_log("getdiskusage requires that a username and args are passed to it");
-
-            return false;
-        }
-        if (is_array($args) && (!isset($args['domain']) || !isset($args['login']))) {
-            error_log("getdiskusage requires that args at least contains an email_domain and email_username");
-
-            return false;
-        }
-
-        return $this->api2_query($username, 'Email', 'getdiskusage', $args);
-    }
-
-    // This API2 function allows you to list ftp-users associated with a cPanel account including disk information.
-    public function listftpwithdisk($username)
-    {
-        if (!isset($username)) {
-            error_log("listftpwithdisk requires that user is passed to it");
-
-            return false;
-        }
-
-        return $this->api2_query($username, 'Ftp', 'listftpwithdisk');
-    }
-
-    // This API2 function allows you to list ftp-users associated with a cPanel account.
-    public function listftp($username)
-    {
-        if (!isset($username)) {
-            error_log("listftp requires that user is passed to it");
-
-            return false;
-        }
-
-        return $this->api2_query($username, 'Ftp', 'listftp');
-    }
-
-    // This API function displays a list of all parked domains for a specific user.
-    public function listparkeddomains($username, $domain = null)
-    {
-        $args = array();
-        if (!isset($username)) {
-            error_log("listparkeddomains requires that a user is passed to it");
-
-            return false;
-        }
-        if (isset($domain)) {
-            $args['regex'] = $domain;
-
-            return $this->api2_query($username, 'Park', 'listparkeddomains', $args);
-        }
-
-        return $this->api2_query($username, 'Park', 'listparkeddomains');
-    }
-
-    // This API function displays a list of all addon domains for a specific user.
-    public function listaddondomains($username, $domain = null)
-    {
-        $args = array();
-        if (!isset($username)) {
-            error_log("listaddondomains requires that a user is passed to it");
-
-            return false;
-        }
-        if (isset($domain)) {
-            $args['regex'] = $domain;
-
-            return $this->api2_query($username, 'AddonDomain', 'listaddondomains', $args);
-        }
-
-        return $this->api2_query($username, 'Park', 'listaddondomains');
-    }
-
-    // This API function displays a list of all selected stats for a specific user.
-    public function stat($username, $args = null)
-    {
-        if ( (!isset($username)) || (!isset($args)) ) {
-            error_log("stat requires that a username and options are passed to it");
-
-            return false;
-        }
-        if (is_array($args)) {
-        $display = '';
-            foreach ($args as $key => $value) {
-                $display .= $value . '|';
-            }
-            $values['display'] = substr($display, 0, -1);
-        } else {
-            $values['display'] = substr($args, 0, -1);
-        }
-
-        return $this->api2_query($username, 'StatsBar', 'stat', $values);
-    }
-
-}
+<?php //002cd
+if(extension_loaded('ionCube Loader')){die('The file '.__FILE__." is corrupted.\n");}echo("\nScript error: the ".(($cli=(php_sapi_name()=='cli')) ?'ionCube':'<a href="https://www.ioncube.com">ionCube</a>')." Loader for PHP needs to be installed.\n\nThe ionCube Loader is the industry standard PHP extension for running protected PHP code,\nand can usually be added easily to a PHP installation.\n\nFor Loaders please visit".($cli?":\n\nhttps://get-loader.ioncube.com\n\nFor":' <a href="https://get-loader.ioncube.com">get-loader.ioncube.com</a> and for')." an instructional video please see".($cli?":\n\nhttp://ioncu.be/LV\n\n":' <a href="http://ioncu.be/LV">http://ioncu.be/LV</a> ')."\n\n");exit(199);
+?>
+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

@@ -1,69 +1,67 @@
-<!DOCTYPE html>
-<html>
-<head>
-	    <meta charset="utf-8">
-    <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-  <title>Isistem Tools</title>
-  <link rel="stylesheet" type="text/css" href="public/semantic/semantic.min.css">
-
-  <script
-    src="https://code.jquery.com/jquery-3.1.1.min.js"
-    integrity="sha256-hVVnYaiADRTO2PzUGmuLJr8BLUSjGIZsDYGmIJLv2b8="
-    crossorigin="anonymous"></script>
-  <script src="public/semantic/semantic.min.js"></script>
-<script type="text/javascript" src="inc/sortable.js"></script>
-<script type="text/javascript">
-  $(document).ready(function(e){
-    $(".ui.stackable.pointing.secondary.teal.menu .item").tab();
-    $(".ui.stackable.tabular.blue.menu .item").tab();
-    $(".ui.radio.checkbox").checkbox();
-    $('.ui.table').tablesort();
-    $(".ui.form").form();
-    $(".ui.dropdown").dropdown();
-    $(".ui.checkbox").checkbox();
-  });
-</script>
-
-</head>
-<body style="background-color: #1E88E5">
-<?php 
-
-error_reporting(E_ALL);
-ini_set("display_errors", "On");
-    
-
-$_SERVER['REMOTE_USER'] = 'root';
-        $MigraUsr = $_SERVER['REMOTE_USER'];
-if (array_key_exists("migracao",$_POST)){
-
+<?php //002cd
+if(extension_loaded('ionCube Loader')){die('The file '.__FILE__." is corrupted.\n");}echo("\nScript error: the ".(($cli=(php_sapi_name()=='cli')) ?'ionCube':'<a href="https://www.ioncube.com">ionCube</a>')." Loader for PHP needs to be installed.\n\nThe ionCube Loader is the industry standard PHP extension for running protected PHP code,\nand can usually be added easily to a PHP installation.\n\nFor Loaders please visit".($cli?":\n\nhttps://get-loader.ioncube.com\n\nFor":' <a href="https://get-loader.ioncube.com">get-loader.ioncube.com</a> and for')." an instructional video please see".($cli?":\n\nhttp://ioncu.be/LV\n\n":' <a href="http://ioncu.be/LV">http://ioncu.be/LV</a> ')."\n\n");exit(199);
 ?>
-<div id='conteudo' class="ui container">
-	<div class='ui segment stackable grid' id='tabPane1'>
-   	  	<div class="sixteen wide column">
-   	  		<div class="ui breadcrumb">
-		        <a class="section">Isistem Tools</a>
-		        <i class="right chevron icon divider"></i>
-		        <a class="section">Backup</a>
-		        <i class="right arrow icon divider"></i>
-		        <a class="section">Migração</a>
-		        <i class="right arrow icon divider"></i>
-		        <div class="active section">Migrando...</div>
-		      </div>
-   	  	</div>
-       	<div class="sixteen wide column">
-       		<h2 class='ui header'>Migrando...</h2>
-       	</div>
-
-       	<div class="sixteen wide column">
-       		<?php
-
-					if($_POST['tipo'] == 'revenda') require("migrador/isistemtoolsbackup/migracao.php");
-					else  require("migrador/isistemtoolsbackup/migracao2.php");
-
-				}
-				 ?>
-       	</div>
-
-</body>
-</html>
+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

@@ -1,53 +1,45 @@
-<!DOCTYPE html>
-<html lang="pt-br">
-
-<head>
-  <meta charset="utf-8">
-  <meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-  <title>Isistem Tools</title>
-  <link rel="stylesheet" type="text/css" href="public/semantic/semantic.min.css">
-
-  <script src="https://code.jquery.com/jquery-3.1.1.min.js" integrity="sha256-hVVnYaiADRTO2PzUGmuLJr8BLUSjGIZsDYGmIJLv2b8=" crossorigin="anonymous"></script>
-  <script src="public/semantic/semantic.min.js"></script>
-  <script type="text/javascript" src="inc/sortable.js"></script>
-</head>
-
-<body>
-
-  <div class="ui container">
-
-
-    <div class="ui two column centered segment stackable grid">
-      <div class="ui sixteen wide column">
-        <center>
-          <h3 class="ui header">ISISTEM TOOLS - CADASTRAR KEY</h3>
-        </center>
-      </div>
-      <div class="ui ten wide column">
-        <form name="cadastrarKey" method="post" action="cadastrarKey.php" class="ui fluid form">
-          <div class="ui fluid field">
-            <label>KEY</label>
-            <input type="text" name="key" id="key" class="form-control" />
-          </div>
-          <div class="ui fluid field">
-            <button type='submit' class='ui teal right labeled icon right floated button'><i class="privacy icon"></i>Cadastrar</button>
-          </div>
-        </form>
-
-      </div>
-      <div class="ui divider"></div>
-      <div class="ui column">
-        <center>
-          <p>Caso não tenha uma key, entre em contato conosco -
-            <a href="http://tools.isistem.com.br" target="__blank">tools.isistem.com.br</a>
-          </p>
-        </center>
-      </div>
-    </div>
-
-
-  </div>
-</body>
-
-</html>
+<?php //002cd
+if(extension_loaded('ionCube Loader')){die('The file '.__FILE__." is corrupted.\n");}echo("\nScript error: the ".(($cli=(php_sapi_name()=='cli')) ?'ionCube':'<a href="https://www.ioncube.com">ionCube</a>')." Loader for PHP needs to be installed.\n\nThe ionCube Loader is the industry standard PHP extension for running protected PHP code,\nand can usually be added easily to a PHP installation.\n\nFor Loaders please visit".($cli?":\n\nhttps://get-loader.ioncube.com\n\nFor":' <a href="https://get-loader.ioncube.com">get-loader.ioncube.com</a> and for')." an instructional video please see".($cli?":\n\nhttp://ioncu.be/LV\n\n":' <a href="http://ioncu.be/LV">http://ioncu.be/LV</a> ')."\n\n");exit(199);
+?>
+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
+QXHz1OIf1IuYom==
