@@ -9,13 +9,9 @@ D='\033[01;32m'
 R='\033[0m'
 
 cd /root
-#git clone https://github.com/isistem/isistem-tools/raw/main/isistem_tools81
+git clone https://github.com/isistem/isistem-tools/
 
-wget https://github.com/isistem/isistem-tools/raw/main/isistem_tools81.zip
-unzip isistem_tools81.zip
-rm -rf isistem_tools81.zip
-
-cd isistem_tools81
+cd isistem-tools/isistem_tools81
 cp -R isistem-tools /usr/local/cpanel/whostmgr/docroot/cgi
 
 #Movendo o icone para seu local de armazenamento
