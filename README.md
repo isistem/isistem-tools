@@ -14,7 +14,7 @@ systemctl stop NetworkManager
 systemctl disable NetworkManager
 ```
 ```sh
-yum -y install nano && yum -y install perl && yum -y install dnf
+yum -y install nano && yum -y install perl && yum -y install dnf && yum -y install git 
 ```
 ```sh
 nano /etc/selinux/config
@@ -24,7 +24,7 @@ altere a variavel SELINUX - *SELINUX=disable*
 ```sh
 nano /etc/resolv.conf
 ```
-inclua - *nameserver 8.8.8.8 e nameserver 8.8.4.4*
+inclua - *nameserver 8.8.8.8 nameserver 8.8.4.4*
 
 #### Instalação do CPanel
 https://docs.cpanel.net/installation-guide/install/
@@ -32,7 +32,6 @@ https://docs.cpanel.net/installation-guide/install/
 ```sh
 dnf -y install epel-release && dnf -y install screen && screen -r
 ```
-
 ```sh
 cd /home && curl -o latest -L https://securedownloads.cpanel.net/latest && sh latest
 ```
