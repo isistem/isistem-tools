@@ -43,7 +43,7 @@ cd /usr/local/cpanel/whostmgr/docroot/cgi && wget github.com/isistem/isistem-too
 ##### Gerar e configurar accesshash (token)
 Manager API Token -> Gerar Token
 ```sh
-nano /root/token.txt
+nano /root/token.itk
 <TOKEN>
 ```
 ```sh
