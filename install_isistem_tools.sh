@@ -9,7 +9,7 @@ D='\033[01;32m'
 R='\033[0m'
 
 cd /root
-git clone https://github.com/isistem/isistem-tools/
+git clone https://github.com/isistem/isistem-tools-online/
 
 cd isistem-tools/isistem_tools81
 cp -R isistem-tools /usr/local/cpanel/whostmgr/docroot/cgi

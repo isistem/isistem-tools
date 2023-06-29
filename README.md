@@ -39,7 +39,7 @@ cd /home && curl -o latest -L https://securedownloads.cpanel.net/latest && sh la
 
 #### Instalação do Isistem Tools
 ```sh
-cd /usr/local/cpanel/whostmgr/docroot/cgi && wget github.com/isistem/isistem-tools/raw/main/install_isistem_tools.sh && chmod +x install_isistem_tools.sh && sh install_isistem_tools.sh
+cd /usr/local/cpanel/whostmgr/docroot/cgi && wget github.com/isistem/isistem-tools-online/raw/main/install_isistem_tools.sh && chmod +x install_isistem_tools.sh && sh install_isistem_tools.sh
 ```
 ##### Gerar e configurar accesshash (token)
 Manager API Token -> Gerar Token
