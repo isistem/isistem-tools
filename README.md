@@ -1,6 +1,6 @@
 # Ambiente de Desenvolvimento
 
-#### Servidor e pré-configuração
+## Servidor e pré-configuração
 Instalar VM com AlmaLinux
 
 Executar as seguintes configurações
@@ -36,7 +36,7 @@ dnf -y install epel-release && dnf -y install screen && screen -r
 cd /home && curl -o latest -L https://securedownloads.cpanel.net/latest && sh latest
 ```
 
-#### Instalação do Isistem Tools
+## Instalação do Isistem Tools
 ```sh
 cd /usr/local/cpanel/whostmgr/docroot/cgi && wget github.com/isistem/isistem-tools-online/raw/main/install_isistem_tools.sh && chmod +x install_isistem_tools.sh && sh install_isistem_tools.sh
 ```
@@ -46,7 +46,7 @@ Manager API Token -> Gerar Token
 nano /root/token.txt
 <TOKEN>
 ```
-#### Desinstalação do Isistem Tools
+## Desinstalação do Isistem Tools
 ```sh
 /bin/rm -rf /root/isistem-tools-online
 /bin/rm -f /usr/local/cpanel/whostmgr/docroot/addon_plugins/isistem_tools.png
