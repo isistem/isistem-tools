@@ -49,6 +49,7 @@ nano /root/token.txt
 ```
 #### Desinstalação do Isistem Tools
 ```sh
+/bin/rm -rf /root/isistem-tools-online
 /bin/rm -f /usr/local/cpanel/whostmgr/docroot/addon_plugins/isistem_tools.png
 /bin/rm -rf /usr/local/cpanel/whostmgr/docroot/cgi/isistem-tools
 /bin/rm -rf /usr/local/cpanel/whostmgr/docroot/cgi/isistem_tools81
