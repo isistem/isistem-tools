@@ -16,11 +16,11 @@ cd isistem-tools-online/isistem_tools81
 cp -R isistem-tools /usr/local/cpanel/whostmgr/docroot/cgi
 
 #Movendo o icone para seu local de armazenamento
-cd /root/isistem_tools81/isistem-tools/public/icon/
+cd /root/isistem-tools-online/isistem_tools81/isistem-tools/public/icon/
 cp isistem_tools.png /usr/local/cpanel/whostmgr/docroot/addon_plugins/
 
 #Movendo arquivo.conf
-cd /root/isistem_tools81
+cd /root/isistem-tools-online/isistem_tools81
 cp isistem_tools.conf /root
 
 #Registra o plugin com AppConfig
@@ -30,11 +30,11 @@ ls -al /var/cpanel/apps
 #Movendo arquivo de pluguin
 mkdir /usr/local/cpanel/whostmgr/docroot/cgi/isistem_tools81
 chmod 755 /usr/local/cpanel/whostmgr/docroot/cgi/isistem_tools81
-cd /root/isistem_tools81
+cd /root/isistem-tools-online/isistem_tools81
 cp -R isistem-tools /usr/local/cpanel/whostmgr/docroot/cgi/isistem_tools81
 
 #Movendo o arquivo .cgi e outros arquivos .sh para seu local de armazenamento
-cd /root/isistem_tools81
+cd /root/isistem-tools-online/isistem_tools81
 cp configuracao.sh /usr/local/cpanel/whostmgr/docroot/cgi/isistem_tools81
 cp compilacao.sh /usr/local/cpanel/whostmgr/docroot/cgi/isistem_tools81
 cp -f addon_isistem_tools.cgi /usr/local/cpanel/whostmgr/docroot/cgi/isistem_tools81
