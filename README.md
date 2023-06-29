@@ -53,13 +53,13 @@ nano /usr/local/cpanel/whostmgr/docroot/cgi/isistem-tools/keyfile.itk
 ## Desinstalação do Isistem Tools
 ```sh
 /bin/rm -rf /root/isistem-tools-online
+/bin/rm -rf /root/isistem_tools.conf
 /bin/rm -f /usr/local/cpanel/whostmgr/docroot/addon_plugins/isistem_tools.png
 /bin/rm -rf /usr/local/cpanel/whostmgr/docroot/cgi/isistem-tools
 /bin/rm -rf /usr/local/cpanel/whostmgr/docroot/cgi/isistem_tools81
 /bin/rm -rf /usr/local/cpanel/whostmgr/docroot/cgi/install_isistem_tools.sh
 /usr/local/cpanel/bin/unregister_appconfig /var/cpanel/apps/isistem_tools.conf
 ```
-
 ## Notas
 ##### Documentação 
 https://docs.cpanel.net/
