@@ -22,11 +22,11 @@ function get_token()
 
 function verificaToken(): bool {
     include_once("conexao.php");
-    $tokenFile = "./tokenfile.itk";
+    $keyFile = "./keyfile.itk";
     $keyAccess = "/root/token.txt";
 
-    if (file_exists($tokenFile) && file_exists($keyAccess)) {
-		$systemKey = trim(file_get_contents($tokenFile));
+    if (file_exists($keyFile) && file_exists($keyAccess)) {
+		$systemKey = trim(file_get_contents($keyFile));
         $searchKey = "SELECT code FROM token WHERE code = '$systemKey'";
         $result = $mysqli->query($searchKey);
         if ($result === false || $result->num_rows === 0) {

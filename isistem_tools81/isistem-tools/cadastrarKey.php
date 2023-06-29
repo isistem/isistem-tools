@@ -6,8 +6,8 @@ if ($_POST["key"] != "") {
 
 	if ($key == $accessToken) {
 		include_once("inc/conexao.php");
-		$tokenFile = "tokenfile.itk";
-		file_put_contents($tokenFile, $accessToken);
+		$keyFile = "keyfile.itk";
+		file_put_contents($keyFile, $accessToken);
 		$datetime = date('Y-m-d H:i:s');
 		$insertKey = "INSERT INTO token (code, created) VALUES ('$key', '$datetime')";
 		$mysqli->query($insertKey);
